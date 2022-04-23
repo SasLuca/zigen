@@ -1,0 +1,43 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Run default example",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/zig-out/bin/zigen-basic-example.exe",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "environment": [],
+            "preLaunchTask": "install default_example",
+            "logging": {
+                "exceptions": true,
+                "moduleLoad": false,
+                "programOutput": true,
+                "engineLogging": false,
+                "trace": false,
+                "traceResponse": false,
+            }
+        },
+        {
+            "name": "Run tests",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/zig-out/bin/zigen-tests.exe",
+            "args": [ "zig" ],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "environment": [],
+            "preLaunchTask": "install tests",
+            "logging": {
+                "exceptions": true,
+                "moduleLoad": false,
+                "programOutput": true,
+                "engineLogging": false,
+                "trace": false,
+                "traceResponse": false,
+            }
+        }
+    ]
+}

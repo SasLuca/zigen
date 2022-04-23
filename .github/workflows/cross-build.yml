@@ -1,0 +1,34 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    paths: 
+      - "*.zig"
+      - "src/*.zig"
+      - "examples/*.zig"
+      - ".github/workflows/cross-build.yml"
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "0 5 * * *" # run at 5 AM UTC
+
+jobs:
+  cross-build:
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: Setup Zig
+        uses: goto-bus-stop/setup-zig@v1
+        with:
+          version: master
+
+      - name: Run the test suite and examples
+        run: |
+          zig build test
