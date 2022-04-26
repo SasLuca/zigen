@@ -2,10 +2,50 @@ const std = @import("std");
 
 const Generator = @This();
 arena: std.heap.ArenaAllocator,
-decls: std.ArrayListUnmanaged(Decl) = .{},
+top_level_field_indices: std.ArrayListUnmanaged(usize) = .{},
+/// indexes into `Arrays.decls`
+top_level_decl_indices: std.ArrayListUnmanaged(usize) = .{},
 
-enum_types: std.ArrayListUnmanaged(EnumType) = .{},
-enum_fields: std.ArrayListUnmanaged(EnumField) = .{},
+arrays: Arrays = .{},
+
+pub const Arrays = struct
+{
+    decls: std.MultiArrayList(Arrays.Decl) = .{},
+    literals: std.StringArrayHashMapUnmanaged(void) = .{},
+    imports: std.ArrayListUnmanaged([]const u8) = .{},
+
+    pub const Decl = struct
+    {
+        name: []const u8,
+        /// refers to the index of the parent container declaration, with 'null' meaning file scope.
+        parent_index: ?Decl.Index,
+        type_annotation: ?Decl.Value,
+        value: Decl.Value,
+        flags: Decl.Flags,
+
+        pub const Flags = packed struct { is_pub: bool, is_const: bool };
+        pub const Index = usize;
+        pub const Value = struct
+        {
+            /// refers to the index of the value referred to by the declaration. Which array it indexes into is dependent on `Value.tag`.
+            index: Value.Index,
+            tag: Value.Tag,
+
+            pub const Index = usize;
+            pub const Tag = enum(usize)
+            {
+                /// index into `Arrays.literals`.
+                literal,
+                /// index into `Arrays.imports`.
+                import,
+                /// index into `Arrays.decls`.
+                decl_alias,
+                /// TODO:
+                function,
+            };
+        };
+    };
+};
 
 pub fn init(child_allocator: std.mem.Allocator) Generator
 {
@@ -19,57 +59,76 @@ pub fn deinit(self: *Generator) void
     self.arena.deinit();
 }
 
-pub fn write(self: Generator, writer: anytype) @TypeOf(writer).Error!void
+pub fn write(self: Generator, writer: anytype) (@TypeOf(writer).Error || std.mem.Allocator.Error)!void
 {
-    for (self.decls.items) |decl|
+    for (self.top_level_field_indices.items) |field_index|
     {
-        if (decl.is_pub) try writer.writeAll("pub ");
-        try if (decl.is_const)
-            writer.writeAll("const ")
+        _ = field_index;
+        std.debug.todo("");
+    }
+    for (self.top_level_decl_indices.items) |decl_index|
+    {
+        const decl: Arrays.Decl = self.arrays.decls.get(decl_index);
+        if (decl.flags.is_pub) try writer.writeAll("pub ");
+        if (decl.value.tag != .function)
+        {
+            try writer.writeAll(if (decl.flags.is_const) "const " else "var ");
+            try writer.print("{s}", .{std.zig.fmtId(decl.name)});
+            if (decl.type_annotation) |type_annotation|
+            {
+                try writer.writeAll(": ");
+                switch (type_annotation.tag)
+                {
+                    .literal => try writer.print("{s}", .{self.arrays.literals.keys()[type_annotation.index]}),
+                    .import => try writer.print("@import(\"{s}\")", .{self.arrays.imports.items[decl.value.index]}),
+                    .decl_alias => try self.writeDeclReference(self.arrays.decls.get(type_annotation.index), writer),
+                    .function => std.debug.todo(""),
+                }
+            }
+            try writer.writeAll(" = ");
+        }
         else
-            writer.writeAll("var ");
-        try writer.print("{s} = ", .{decl.name});
+        {
+            try writer.print("fn {s}", .{std.zig.fmtId(decl.name)});
+            std.debug.todo("");
+        }
+
         switch (decl.value.tag)
         {
-            .@"enum" =>
+            .literal => try writer.print("{s};\n", .{self.arrays.literals.keys()[decl.value.index]}),
+            .import => try writer.print("@import(\"{s}\");\n", .{self.arrays.imports.items[decl.value.index]}),
+            .decl_alias =>
             {
-                const info: EnumType = self.enum_types.items[decl.value.index];
-                try writer.writeAll("enum");
-                if (info.tag) |tag| try writer.print("({})", .{tag});
-                try writer.writeAll("{\n");
-                for (info.field_indexes) |field_idx|
-                {
-                    const field: EnumField = self.enum_fields.items[field_idx];
-                    try writer.print("    {s} = {s},\n", .{field.name, field.value});
-                }
-                if (!info.is_exhaustive) try writer.writeAll("    _,\n");
-                try writer.writeAll("};\n");
+                try self.writeDeclReference(self.arrays.decls.get(decl.value.index), writer);
+                try writer.writeAll(";\n");
             },
+            .function => std.debug.todo(""),
         }
     }
 }
 
-pub fn addDecl(self: *Generator, is_pub: bool, mutability: enum { Const, Var }, name: []const u8, value: Decl.Value) std.mem.Allocator.Error!void
+fn writeDeclReference(self: Generator, decl: Arrays.Decl, writer: anytype) (@TypeOf(writer).Error || std.mem.Allocator.Error)!void
 {
-    const new_decl = try self.decls.addOne(self.allocator());
-    errdefer self.decls.shrinkRetainingCapacity(self.decls.items.len - 1);
+    const slice = self.arrays.decls.slice();
 
-    new_decl.name = try self.allocator().dupe(u8, name);
-    errdefer self.allocator().free(new_decl.name);
+    const parent_indices: []const ?Arrays.Decl.Index = slice.items(.parent_index);
+    const names: []const []const u8 = slice.items(.name);
 
-    new_decl.value = value;
-    new_decl.is_pub = is_pub;
-    new_decl.is_const = mutability == .Const;
-}
+    var access_chain = std.ArrayList([]const u8).init(self.arena.child_allocator);
+    defer access_chain.deinit();
 
-pub fn buildEnum(self: *Generator, tag: ?IntegerType, is_exhaustive: bool) EnumBuilder
-{
-    return .{
-        .generator = self,
-        .tag = tag,
-        .is_exhaustive = is_exhaustive,
-        .fields = .{},
-    };
+    var current_parent_idx = decl.parent_index;
+    while (current_parent_idx) |idx|
+    {
+        try access_chain.insert(0, names[idx]);
+        current_parent_idx = parent_indices[idx];
+    }
+
+    for (access_chain.items) |container_name|
+    {
+        try writer.print("{s}.", .{std.zig.fmtId(container_name)});
+    }
+    try writer.print("{s}", .{std.zig.fmtId(names[decl.value.index])});
 }
 
 fn allocator(self: *Generator) std.mem.Allocator
@@ -77,82 +136,99 @@ fn allocator(self: *Generator) std.mem.Allocator
     return self.arena.allocator();
 }
 
-const EnumBuilder = struct
+pub fn addDecl(
+    self: *Generator,
+    is_pub: bool,
+    mutability: enum { @"const", @"var" },
+    name: []const u8,
+    type_annotation: ?Arrays.Decl.Value,
+    value: Arrays.Decl.Value,
+) std.mem.Allocator.Error!Arrays.Decl.Value
 {
-    generator: *Generator,
-    tag: ?IntegerType,
-    is_exhaustive: bool,
-    fields: std.ArrayListUnmanaged(EnumField) = .{},
+    const index = self.arrays.decls.len;
 
-    pub fn addField(self: *EnumBuilder, name: []const u8, value: anytype) std.mem.Allocator.Error!void
-    {
-        const new = try self.fields.addOne(self.generator.allocator());
-        errdefer self.fields.shrinkRetainingCapacity(self.fields.items.len - 1);
-        
-        new.name = try self.generator.allocator().dupe(u8, name);
-        errdefer self.generator.allocator().free(new.name);
-        
-        const Value = @TypeOf(value);
-        const err_msg = "Expected an integer or a zig string, got " ++ @typeName(Value);
-        new.value = switch (@typeInfo(Value))
-        {
-            .Int,
-            .ComptimeInt,
-            => try std.fmt.allocPrint(self.generator.allocator(), "{d}", .{value}),
+    try self.top_level_decl_indices.append(self.allocator(), index);
+    errdefer self.top_level_decl_indices.shrinkRetainingCapacity(self.top_level_decl_indices.items.len - 1);
 
-            .Pointer => if (std.meta.trait.isZigString(Value))
-                try self.generator.allocator().dupe(u8, value)
-            else
-                @compileError(err_msg),
+    const duped_name = try self.allocator().dupe(u8, name);
+    errdefer self.allocator().free(duped_name);
 
-            .Optional => |optional|
-            if (std.meta.trait.isZigString(optional.child))
-                if (value) |value_unwrapped| try self.generator.allocator().dupe(u8, value_unwrapped) else null
-            else
-                @compileError(err_msg),
-            .Null => null,
-            else => @compileError(err_msg),
-        };
-        errdefer self.generator.allocator().free(new.value orelse &[_]u8{});
+    try self.arrays.decls.append(self.allocator(), Arrays.Decl{
+        .name = duped_name,
+        .parent_index = null,
+        .type_annotation = type_annotation,
+        .value = value,
+        .flags = .{
+            .is_pub = is_pub,
+            .is_const = mutability == .@"const",
+        },
+    });
+
+    return Arrays.Decl.Value{
+        .index = index,
+        .tag = .decl_alias,
+    };
+}
+
+pub fn createLiteral(self: *Generator, literal_str: []const u8) std.mem.Allocator.Error!Arrays.Decl.Value
+{
+    const duped_literal_str = try self.allocator().dupe(u8, literal_str);
+    errdefer self.allocator().free(duped_literal_str);
+
+    var index = self.arrays.literals.entries.len;
+    const gop = try self.arrays.literals.getOrPut(self.allocator(), duped_literal_str);
+    if (gop.found_existing) {
+        self.allocator().free(duped_literal_str);
+        index = gop.index;
     }
 
-    pub fn commit(self: *EnumBuilder) std.mem.Allocator.Error!Decl.Value
-    {
-        const new_enum_type = try self.generator.enum_types.addOne(self.generator.allocator());
-        errdefer self.generator.enum_types.shrinkRetainingCapacity(self.generator.enum_types.items.len - 1);
+    return Arrays.Decl.Value{
+        .index = index,
+        .tag = .literal,
+    };
+}
 
-        const field_indexes = try self.generator.allocator().alloc(u32, self.fields.items.len);
-        errdefer self.generator.allocator().free(field_indexes);
-
-        for (field_indexes) |*index, i| index.* = @intCast(u32, self.generator.enum_fields.items.len + i);
-
-        try self.generator.enum_fields.appendSlice(self.generator.allocator(), self.fields.items);
-        errdefer self.generator.enum_fields.shrinkRetainingCapacity(self.generator.enum_fields.items.len - self.fields.items.len);
-
-        new_enum_type.tag = self.tag;
-        new_enum_type.is_exhaustive = self.is_exhaustive;
-        new_enum_type.field_indexes = field_indexes;
-
-        self.fields.deinit(self.generator.allocator());
-        defer self.* = undefined;
-
-        return Decl.Value{
-            .tag = .@"enum",
-            .index = @intCast(u32, self.generator.enum_types.items.len - 1),
-        };
-    }
-};
-
-const IntegerType = struct
+pub fn createImport(self: *Generator, import_str: []const u8) std.mem.Allocator.Error!Arrays.Decl.Value
 {
-    sign: std.builtin.Signedness,
+    const duped_import_str = try self.allocator().dupe(u8, import_str);
+    errdefer self.allocator().free(duped_import_str);
+
+    const index = self.arrays.imports.items.len;
+    try self.arrays.imports.append(self.allocator(), duped_import_str);
+
+    return Arrays.Decl.Value{
+        .index = index,
+        .tag = .import,
+    };
+}
+
+pub const IntInfo = struct
+{
+    signedness: std.builtin.Signedness,
     bits: u16,
 
-    pub fn format(self: IntegerType, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) @TypeOf(writer).Error!void
+    pub fn init(signedness: std.builtin.Signedness, bits: u16) IntInfo
+    {
+        return .{
+            .signedness = signedness,
+            .bits = bits,
+        };
+    }
+
+    pub fn from(comptime T: type) IntInfo
+    {
+        const info = @typeInfo(T).Int;
+        return .{
+            .signedness = info.signedness,
+            .bits = info.bits,
+        };
+    }
+
+    pub fn format(self: IntInfo, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) @TypeOf(writer).Error!void
     {
         _ = fmt;
         _ = options;
-        try switch (self.sign)
+        try switch (self.signedness)
         {
             .signed => writer.print("i{d}", .{self.bits}),
             .unsigned => writer.print("u{d}", .{self.bits}),
@@ -160,64 +236,36 @@ const IntegerType = struct
     }
 };
 
-pub fn integerType(sign: std.builtin.Signedness, bits: u16) IntegerType
+test "create import"
 {
-    return .{ .sign = sign, .bits = bits };
-}
+    var gen = Generator.init(std.testing.allocator);
+    defer gen.deinit();
 
-const Decl = struct
-{
-    is_pub: bool,
-    is_const: bool,
-    name: []const u8,
-    value: Value,
+    const foo_import = try gen.addDecl(
+        false,
+        .@"const",
+        "foo",
+        null,
+        try gen.createImport("foo.zig"),
+    );
 
-    const Value = struct {
-        tag: Value.Tag,
-        /// usage is in accordance with `tag`:
-        /// * `@"enum"`: index into `Generator.enum_types`.
-        index: Value.Index,
+    _ = try gen.addDecl(
+        true,
+        .@"const",
+        "bar",
+        null,
+        foo_import
+    );
 
-        const Index = u32;
-        const Tag = enum {
-            @"enum",
-        };
-    };
+    _ = try gen.addDecl(
+        true,
+        .@"var",
+        "baz",
+        try gen.createLiteral("u32"),
+        try gen.createLiteral("3"),
+    );
 
-};
-
-const EnumType = struct
-{
-    tag: ?IntegerType,
-    is_exhaustive: bool,
-    field_indexes: []const u32,
-};
-
-const EnumField = struct
-{
-    name: []const u8,
-    value: ?[]const u8,
-};
-
-test "create enum"
-{
-    var generator = Generator.init(std.testing.allocator);
-    defer generator.deinit();
-
-    {
-        var ebuilder = generator.buildEnum(integerType(.signed, 16), false);
-        try ebuilder.addField("foo", 0);
-        try ebuilder.addField("bar", 1);
-        try ebuilder.addField("baz", std.math.maxInt(u16));
-
-        const value = try ebuilder.commit();
-        try generator.addDecl(true, .Const, "FooBarBaz", value);
-    }
-    
-    var buffer = std.ArrayList(u8).init(std.testing.allocator);
-    defer buffer.deinit();
-    
-    try generator.write(buffer.writer());
-    
-    std.debug.print("\n{s}\n", .{buffer.items});
+    std.debug.print("\n\n", .{});
+    try gen.write(std.io.getStdErr().writer());
+    std.debug.print("\n", .{});
 }
