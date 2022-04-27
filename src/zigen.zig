@@ -56,8 +56,11 @@ pub fn deinit(self: *Generator) void
     self.arena.deinit();
 }
 
-pub fn write(self: Generator, writer: anytype) (@TypeOf(writer).Error || std.mem.Allocator.Error)!void
+pub fn format(self: Generator, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) @TypeOf(writer).Error!void
 {
+    _ = fmt;
+    _ = options;
+
     for (self.top_level_decl_indices.items) |decl_index|
     {
         const decl: Decl = self.decls.get(decl_index);
@@ -73,16 +76,17 @@ pub fn write(self: Generator, writer: anytype) (@TypeOf(writer).Error || std.mem
 
 fn fmtNode(self: *const Generator, node: Node) std.fmt.Formatter(formatNode)
 {
-    return .{
-        .data = .{
+    return std.fmt.Formatter(formatNode){
+        .data = FormattableNode{
             .gen = self,
             .node = node,
         },
     };
 }
 
+const FormattableNode = struct { gen: *const Generator, node: Node };
 fn formatNode(
-    fmt_node: struct { gen: *const Generator, node: Node },
+    fmt_node: FormattableNode,
     comptime fmt: []const u8,
     options: std.fmt.FormatOptions,
     writer: anytype,
@@ -135,7 +139,7 @@ fn formatNode(
                 while (i_limit < parent_count) : (i_limit += 1)
                 {
                     var iter = init_parent_index_iterator;
-                    
+
                     var i: usize = parent_count;
                     while (true)
                     {
@@ -267,7 +271,5 @@ test "create import"
     const foo_import_decl = try gen.addConstDecl(false, "internal_foo", null, foo_import);
     _ = try gen.addConstDecl(true, "foo", try gen.createLiteral("type"), foo_import_decl);
 
-    std.debug.print("\n\n", .{});
-    try gen.write(std.io.getStdErr().writer());
-    std.debug.print("\n", .{});
+    std.debug.print("\n\n```\n{}\n```\n", .{gen});
 }
