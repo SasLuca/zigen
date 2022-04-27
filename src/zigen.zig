@@ -2,48 +2,45 @@ const std = @import("std");
 
 const Generator = @This();
 arena: std.heap.ArenaAllocator,
-top_level_field_indices: std.ArrayListUnmanaged(usize) = .{},
-/// indexes into `Arrays.decls`
+/// indexes into `Generator.decls`
 top_level_decl_indices: std.ArrayListUnmanaged(usize) = .{},
 
-arrays: Arrays = .{},
+decls: std.MultiArrayList(Decl) = .{},
+raw_literals: std.StringArrayHashMapUnmanaged(void) = .{},
+imports: std.StringArrayHashMapUnmanaged(void) = .{},
 
-pub const Arrays = struct
+pub const Node = struct
 {
-    decls: std.MultiArrayList(Arrays.Decl) = .{},
-    literals: std.StringArrayHashMapUnmanaged(void) = .{},
-    imports: std.ArrayListUnmanaged([]const u8) = .{},
+    /// refers to the index of the value referred to by the declaration. Which array it indexes into is dependent on `Node.tag`.
+    index: Node.Index,
+    tag: Node.Tag,
 
-    pub const Decl = struct
+    pub const Index = usize;
+    pub const Tag = enum(usize)
     {
-        name: []const u8,
-        /// refers to the index of the parent container declaration, with 'null' meaning file scope.
-        parent_index: ?Decl.Index,
-        type_annotation: ?Decl.Value,
-        value: Decl.Value,
-        flags: Decl.Flags,
+        /// index into `Generator.decls`.
+        decl,
+        /// index into `Generator.raw_literals`.
+        raw_literal,
+        /// index into `Generator.imports`.
+        import,
+    };
+};
 
-        pub const Flags = packed struct { is_pub: bool, is_const: bool };
-        pub const Index = usize;
-        pub const Value = struct
-        {
-            /// refers to the index of the value referred to by the declaration. Which array it indexes into is dependent on `Value.tag`.
-            index: Value.Index,
-            tag: Value.Tag,
+pub const Decl = struct
+{
+    /// refers to the index of the parent container declaration, with 'null' meaning file scope.
+    parent_index: ?Node.Index,
+    flags: Decl.Flags,
+    name: []const u8,
+    type_annotation: ?Node,
+    value: Node,
 
-            pub const Index = usize;
-            pub const Tag = enum(usize)
-            {
-                /// index into `Arrays.literals`.
-                literal,
-                /// index into `Arrays.imports`.
-                import,
-                /// index into `Arrays.decls`.
-                decl_alias,
-                /// TODO:
-                function,
-            };
-        };
+    pub const Flags = packed struct
+    {
+        is_pub: bool,
+        is_extern: bool,
+        is_const: bool,
     };
 };
 
@@ -61,74 +58,98 @@ pub fn deinit(self: *Generator) void
 
 pub fn write(self: Generator, writer: anytype) (@TypeOf(writer).Error || std.mem.Allocator.Error)!void
 {
-    for (self.top_level_field_indices.items) |field_index|
-    {
-        _ = field_index;
-        std.debug.todo("");
-    }
     for (self.top_level_decl_indices.items) |decl_index|
     {
-        const decl: Arrays.Decl = self.arrays.decls.get(decl_index);
+        const decl: Decl = self.decls.get(decl_index);
         if (decl.flags.is_pub) try writer.writeAll("pub ");
-        if (decl.value.tag != .function)
-        {
-            try writer.writeAll(if (decl.flags.is_const) "const " else "var ");
-            try writer.print("{s}", .{std.zig.fmtId(decl.name)});
-            if (decl.type_annotation) |type_annotation|
-            {
-                try writer.writeAll(": ");
-                switch (type_annotation.tag)
-                {
-                    .literal => try writer.print("{s}", .{self.arrays.literals.keys()[type_annotation.index]}),
-                    .import => try writer.print("@import(\"{s}\")", .{self.arrays.imports.items[decl.value.index]}),
-                    .decl_alias => try self.writeDeclReference(self.arrays.decls.get(type_annotation.index), writer),
-                    .function => std.debug.todo(""),
-                }
-            }
-            try writer.writeAll(" = ");
-        }
-        else
-        {
-            try writer.print("fn {s}", .{std.zig.fmtId(decl.name)});
-            std.debug.todo("");
-        }
+        if (decl.flags.is_extern) try writer.writeAll("extern ");
+        try writer.writeAll(if (decl.flags.is_const) "const " else "var ");
 
-        switch (decl.value.tag)
-        {
-            .literal => try writer.print("{s};\n", .{self.arrays.literals.keys()[decl.value.index]}),
-            .import => try writer.print("@import(\"{s}\");\n", .{self.arrays.imports.items[decl.value.index]}),
-            .decl_alias =>
-            {
-                try self.writeDeclReference(self.arrays.decls.get(decl.value.index), writer);
-                try writer.writeAll(";\n");
-            },
-            .function => std.debug.todo(""),
-        }
+        try writer.print("{s}", .{std.zig.fmtId(decl.name)});
+        if (decl.type_annotation) |type_annotation| try writer.print(": {}", .{self.fmtNode(type_annotation)});
+        try writer.print(" = {};\n", .{self.fmtNode(decl.value)});
     }
 }
 
-fn writeDeclReference(self: Generator, decl: Arrays.Decl, writer: anytype) (@TypeOf(writer).Error || std.mem.Allocator.Error)!void
+fn fmtNode(self: *const Generator, node: Node) std.fmt.Formatter(formatNode)
 {
-    const slice = self.arrays.decls.slice();
+    return .{
+        .data = .{
+            .gen = self,
+            .node = node,
+        },
+    };
+}
 
-    const parent_indices: []const ?Arrays.Decl.Index = slice.items(.parent_index);
-    const names: []const []const u8 = slice.items(.name);
+fn formatNode(
+    fmt_node: struct { gen: *const Generator, node: Node },
+    comptime fmt: []const u8,
+    options: std.fmt.FormatOptions,
+    writer: anytype,
+) @TypeOf(writer).Error!void
+{
+    _ = fmt;
+    _ = options;
 
-    var access_chain = std.ArrayList([]const u8).init(self.arena.child_allocator);
-    defer access_chain.deinit();
-
-    var current_parent_idx = decl.parent_index;
-    while (current_parent_idx) |idx|
+    const self = fmt_node.gen;
+    const node = fmt_node.node;
+    switch (node.tag)
     {
-        try access_chain.insert(0, names[idx]);
-        current_parent_idx = parent_indices[idx];
-    }
+        .raw_literal => try writer.writeAll(self.raw_literals.keys()[node.index]),
+        .import => try writer.print("@import(\"{s}\")", .{self.imports.keys()[node.index]}),
+        .decl =>
+        {
+            const slice = self.decls.slice();
+            const names: []const []const u8 = slice.items(.name);
 
-    for (access_chain.items) |container_name|
-    {
-        try writer.print("{s}.", .{std.zig.fmtId(container_name)});
+            const ParentIndexIterator = struct
+            {
+                const ParentIndexIterator = @This();
+                parent_indices: []const ?Node.Index,
+                current_parent_idx: ?usize,
+
+                fn next(it: *ParentIndexIterator) ?Node.Index
+                {
+                    if (it.current_parent_idx) |idx|
+                    {
+                        it.current_parent_idx = it.parent_indices[idx];
+                        return idx;
+                    } else return null;
+                }
+            };
+            const init_parent_index_iterator = ParentIndexIterator{
+                .parent_indices = slice.items(.parent_index),
+                .current_parent_idx = slice.items(.parent_index)[node.index],
+            };
+
+            const parent_count: usize = parent_count: {
+                var parent_count: usize = 0;
+
+                var iter = init_parent_index_iterator;
+                while (iter.next()) |_| parent_count += 1;
+                break :parent_count parent_count;
+            };
+
+            {
+                var i_limit: usize = 0;
+                while (i_limit < parent_count) : (i_limit += 1)
+                {
+                    var iter = init_parent_index_iterator;
+                    
+                    var i: usize = parent_count;
+                    while (true)
+                    {
+                        if (i == i_limit) break;
+                        i -= 1;
+
+                        const parent_idx = iter.next() orelse break;
+                        try writer.print("{s}.", .{std.zig.fmtId(names[parent_idx])});
+                    }
+                }
+            }
+            try writer.print("{s}", .{std.zig.fmtId(names[node.index])});
+        },
     }
-    try writer.print("{s}", .{std.zig.fmtId(names[decl.value.index])});
 }
 
 fn allocator(self: *Generator) std.mem.Allocator
@@ -136,68 +157,66 @@ fn allocator(self: *Generator) std.mem.Allocator
     return self.arena.allocator();
 }
 
-pub fn addDecl(
+pub fn addConstDecl(
     self: *Generator,
     is_pub: bool,
-    mutability: enum { @"const", @"var" },
     name: []const u8,
-    type_annotation: ?Arrays.Decl.Value,
-    value: Arrays.Decl.Value,
-) std.mem.Allocator.Error!Arrays.Decl.Value
+    type_annotation: ?Generator.Node,
+    value: Generator.Node,
+) std.mem.Allocator.Error!Generator.Node
 {
-    const index = self.arrays.decls.len;
+    try self.decls.ensureUnusedCapacity(self.allocator(), 1);
+    const index = self.decls.addOneAssumeCapacity();
+    errdefer self.decls.shrinkRetainingCapacity(index);
 
     try self.top_level_decl_indices.append(self.allocator(), index);
-    errdefer self.top_level_decl_indices.shrinkRetainingCapacity(self.top_level_decl_indices.items.len - 1);
+    errdefer _ = self.top_level_decl_indices.pop();
 
     const duped_name = try self.allocator().dupe(u8, name);
     errdefer self.allocator().free(duped_name);
 
-    try self.arrays.decls.append(self.allocator(), Arrays.Decl{
+    self.decls.set(index, Decl{
         .name = duped_name,
         .parent_index = null,
         .type_annotation = type_annotation,
         .value = value,
         .flags = .{
             .is_pub = is_pub,
-            .is_const = mutability == .@"const",
+            .is_extern = false,
+            .is_const = true,
         },
     });
 
-    return Arrays.Decl.Value{
+    return Generator.Node{
         .index = index,
-        .tag = .decl_alias,
+        .tag = .decl,
     };
 }
 
-pub fn createLiteral(self: *Generator, literal_str: []const u8) std.mem.Allocator.Error!Arrays.Decl.Value
+pub fn createLiteral(self: *Generator, literal_str: []const u8) std.mem.Allocator.Error!Generator.Node
 {
-    const duped_literal_str = try self.allocator().dupe(u8, literal_str);
-    errdefer self.allocator().free(duped_literal_str);
-
-    var index = self.arrays.literals.entries.len;
-    const gop = try self.arrays.literals.getOrPut(self.allocator(), duped_literal_str);
-    if (gop.found_existing) {
-        self.allocator().free(duped_literal_str);
-        index = gop.index;
+    const gop = try self.raw_literals.getOrPut(self.allocator(), literal_str);
+    if (!gop.found_existing)
+    {
+        gop.key_ptr.* = try self.allocator().dupe(u8, literal_str);
     }
 
-    return Arrays.Decl.Value{
-        .index = index,
-        .tag = .literal,
+    return Generator.Node{
+        .index = gop.index,
+        .tag = .raw_literal,
     };
 }
 
-pub fn createImport(self: *Generator, import_str: []const u8) std.mem.Allocator.Error!Arrays.Decl.Value
+pub fn createImport(self: *Generator, import_str: []const u8) std.mem.Allocator.Error!Generator.Node
 {
-    const duped_import_str = try self.allocator().dupe(u8, import_str);
-    errdefer self.allocator().free(duped_import_str);
+    const gop = try self.imports.getOrPut(self.allocator(), import_str);
+    if (!gop.found_existing)
+    {
+        gop.key_ptr.* = try self.allocator().dupe(u8, import_str);
+    }
 
-    const index = self.arrays.imports.items.len;
-    try self.arrays.imports.append(self.allocator(), duped_import_str);
-
-    return Arrays.Decl.Value{
-        .index = index,
+    return Generator.Node{
+        .index = gop.index,
         .tag = .import,
     };
 }
@@ -241,29 +260,12 @@ test "create import"
     var gen = Generator.init(std.testing.allocator);
     defer gen.deinit();
 
-    const foo_import = try gen.addDecl(
-        false,
-        .@"const",
-        "foo",
-        null,
-        try gen.createImport("foo.zig"),
-    );
+    const this_literal = try gen.createLiteral("@This()");
+    _ = try gen.addConstDecl(false, "Self", null, this_literal);
 
-    _ = try gen.addDecl(
-        true,
-        .@"const",
-        "bar",
-        null,
-        foo_import
-    );
-
-    _ = try gen.addDecl(
-        true,
-        .@"var",
-        "baz",
-        try gen.createLiteral("u32"),
-        try gen.createLiteral("3"),
-    );
+    const foo_import = try gen.createImport("foo.zig");
+    const foo_import_decl = try gen.addConstDecl(false, "internal_foo", null, foo_import);
+    _ = try gen.addConstDecl(true, "foo", try gen.createLiteral("type"), foo_import_decl);
 
     std.debug.print("\n\n", .{});
     try gen.write(std.io.getStdErr().writer());
