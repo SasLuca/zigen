@@ -3,14 +3,24 @@ const std = @import("std");
 const Generator = @This();
 arena: std.heap.ArenaAllocator,
 /// indexes into `Generator.decls`
-top_level_decl_indices: std.ArrayListUnmanaged(usize) = .{},
+top_level_decl_indices: std.ArrayListUnmanaged(TopLevelNode) = .{},
 
 raw_literals: std.StringArrayHashMapUnmanaged(void) = .{},
 imports: std.StringArrayHashMapUnmanaged(void) = .{},
+addrofs: std.ArrayListUnmanaged(Node) = .{},
 pointers: std.MultiArrayList(Pointer) = .{},
-decls: std.MultiArrayList(Decl) = .{},
 
-const _ = std.builtin.Type;
+pub const TopLevelNode = struct
+{
+    index: TopLevelNode.Index,
+    tag: TopLevelNode.Tag,
+
+    pub const Index = usize;
+    pub const Tag = enum(usize)
+    {
+        const_decl,
+    };
+};
 
 pub const Node = struct
 {
@@ -21,8 +31,6 @@ pub const Node = struct
     pub const Index = usize;
     pub const Tag = enum(usize)
     {
-        /// index is a garbage value: do note use.
-        extern_decl_value,
         /// index is the tag value of a `Generator.PrimitiveType`.
         primitive_type,
         /// index is the number of bits of the unsigned integer.
@@ -35,8 +43,8 @@ pub const Node = struct
         import,
         /// index into field `Generator.pointers`.
         pointer,
-        /// index into field `Generator.decls`.
-        decl,
+        /// index into field `Generator.addrofs`.
+        addrof,
     };
 };
 
@@ -88,7 +96,7 @@ pub const Decl = struct
     type_annotation: ?Node,
     value: Node,
 
-    pub const Flags = packed struct
+    pub const Flags = extern struct
     {
         is_pub: bool,
         is_extern: bool,
@@ -111,29 +119,10 @@ pub fn deinit(self: *Generator) void
 
 pub fn format(self: Generator, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) @TypeOf(writer).Error!void
 {
+    _ = self;
     _ = fmt;
     _ = options;
-
-    for (self.top_level_decl_indices.items) |decl_index|
-    {
-        const decl: Decl = self.decls.get(decl_index);
-        if (decl.flags.is_pub) try writer.writeAll("pub ");
-        if (decl.flags.is_extern) try writer.writeAll("extern ");
-        if (decl.extern_lib_str) |extern_lib_str| {
-            std.debug.assert(decl.flags.is_extern);
-            try writer.print("\"{s}\" ", .{extern_lib_str});
-        }
-        try writer.writeAll(if (decl.flags.is_const) "const " else "var ");
-
-        try writer.print("{s}", .{std.zig.fmtId(decl.name)});
-        if (decl.type_annotation) |type_annotation| try writer.print(": {}", .{self.fmtNode(type_annotation)});
-        if (decl.flags.is_extern) {
-            try writer.writeAll(";\n");
-            return;
-        }
-        
-        try writer.print(" = {};\n", .{self.fmtNode(decl.value)});
-    }
+    _ = writer;
 }
 
 fn fmtNode(self: *const Generator, node: Node) std.fmt.Formatter(formatNode)
@@ -161,12 +150,12 @@ fn formatNode(
     const node = fmt_node.node;
     switch (node.tag)
     {
-        .extern_decl_value => {},
         .primitive_type => try writer.writeAll(@tagName(@intToEnum(PrimitiveType, node.index))),
         .unsigned_int => try writer.print("u{d}", .{@intCast(u16, node.index)}),
         .signed_int => try writer.print("i{d}", .{@intCast(u16, node.index)}),
         .raw_literal => try writer.writeAll(self.raw_literals.keys()[node.index]),
         .import => try writer.print("@import(\"{s}\")", .{self.imports.keys()[node.index]}),
+        .addrof => try writer.print("&{}", .{self.fmtNode(self.addrofs.items[node.index])}),
         .pointer =>
         {
             const slice = self.pointers.slice();
@@ -209,64 +198,11 @@ fn formatNode(
                     .signed_int,
                     .raw_literal,
                     .import,
-                    .decl,
                     => try writer.print("{}", .{self.fmtNode(children[idx])}),
-                    .extern_decl_value => unreachable,
+                    .addrof => unreachable,
                     .pointer => maybe_current_index = children[idx].index,
                 }
             }
-        },
-        .decl =>
-        {
-            const slice = self.decls.slice();
-            const names: []const []const u8 = slice.items(.name);
-
-            const ParentIndexIterator = struct
-            {
-                const ParentIndexIterator = @This();
-                parent_indices: []const ?Node.Index,
-                current_parent_idx: ?usize,
-
-                fn next(it: *ParentIndexIterator) ?Node.Index
-                {
-                    if (it.current_parent_idx) |idx|
-                    {
-                        it.current_parent_idx = it.parent_indices[idx];
-                        return idx;
-                    } else return null;
-                }
-            };
-            const init_parent_index_iterator = ParentIndexIterator{
-                .parent_indices = slice.items(.parent_index),
-                .current_parent_idx = slice.items(.parent_index)[node.index],
-            };
-
-            const parent_count: usize = parent_count: {
-                var parent_count: usize = 0;
-
-                var iter = init_parent_index_iterator;
-                while (iter.next()) |_| parent_count += 1;
-                break :parent_count parent_count;
-            };
-
-            {
-                var i_limit: usize = 0;
-                while (i_limit < parent_count) : (i_limit += 1)
-                {
-                    var iter = init_parent_index_iterator;
-
-                    var i: usize = parent_count;
-                    while (true)
-                    {
-                        if (i == i_limit) break;
-                        i -= 1;
-
-                        const parent_idx = iter.next() orelse break;
-                        try writer.print("{s}.", .{std.zig.fmtId(names[parent_idx])});
-                    }
-                }
-            }
-            try writer.print("{s}", .{std.zig.fmtId(names[node.index])});
         },
     }
 }
@@ -276,65 +212,17 @@ fn allocator(self: *Generator) std.mem.Allocator
     return self.arena.allocator();
 }
 
-pub fn addDecl(
-    self: *Generator,
-    is_pub: bool,
-    linkage: union(enum) { none, static, dyn: []const u8 },
-    mutability: enum { @"var", @"const" },
-    name: []const u8,
-    type_annotation: ?Node,
-    value: ?Node,
-) std.mem.Allocator.Error!Node
-{
-    try self.decls.ensureUnusedCapacity(self.allocator(), 1);
-    const index = self.decls.addOneAssumeCapacity();
-    errdefer self.decls.shrinkRetainingCapacity(index);
-
-    try self.top_level_decl_indices.append(self.allocator(), index);
-    errdefer _ = self.top_level_decl_indices.pop();
-
-    const duped_name = try self.allocator().dupe(u8, name);
-    errdefer self.allocator().free(duped_name);
-
-    const extern_lib_str: ?[]const u8 = switch (linkage)
-    {
-        .none, .static => null,
-        .dyn => |str| try self.allocator().dupe(u8, str),
-    };
-    errdefer self.allocator().free(extern_lib_str orelse &.{});
-
-    self.decls.set(index, Decl{
-        .parent_index = null,
-        .extern_lib_str = extern_lib_str,
-        .flags = .{
-            .is_pub = is_pub,
-            .is_extern = linkage != .none,
-            .is_const = mutability == .@"const",
-        },
-        .name = duped_name,
-        .type_annotation = type_annotation,
-        .value = if (linkage == .none) value.? else blk: {
-            std.debug.assert(value == null);
-            break :blk Node{
-                .index = undefined,
-                .tag = .extern_decl_value,
-            };
-        },
-    });
-
-    return Node{
-        .index = index,
-        .tag = .decl,
-    };
-}
-
-pub fn primitiveType(self: *Generator, comptime T: type) error{}!Node
+pub fn primitiveType(self: *Generator, tag: PrimitiveType) error{}!Node
 {
     _ = self;
     return Node{
-        .index = @enumToInt(@field(PrimitiveType, @tagName(T))),
+        .index = @enumToInt(tag),
         .tag = .primitive_type,
     };
+}
+pub fn primitiveTypeFrom(self: *Generator, comptime T: type) error{}!Node
+{
+    return self.primitiveType(@field(PrimitiveType, @typeName(T)));
 }
 
 pub fn intType(self: *Generator, sign: std.builtin.Signedness, bits: u16) error{}!Node
@@ -347,6 +235,11 @@ pub fn intType(self: *Generator, sign: std.builtin.Signedness, bits: u16) error{
             .unsigned => .unsigned_int,
         },
     };
+}
+pub fn intTypeFrom(self: *Generator, comptime T: type) error{}!Node
+{
+    const info: std.builtin.Type.Int = @typeInfo(T).Int;
+    return self.intType(info.signedness, info.bits);
 }
 
 pub fn createLiteral(self: *Generator, literal_str: []const u8) std.mem.Allocator.Error!Node
@@ -377,24 +270,71 @@ pub fn createImport(self: *Generator, import_str: []const u8) std.mem.Allocator.
     };
 }
 
+pub fn addressOf(self: *Generator, node: Node) std.mem.Allocator.Error!Node
+{
+    const new_index = self.addrofs.items.len;
+    try self.addrofs.append(self.allocator(), node);
+    return Node{
+        .index = new_index,
+        .tag = .addrof,
+    };
+}
+
+pub fn createPointerType(
+    self: *Generator,
+    size: std.builtin.Type.Pointer.Size,
+    child: Node,
+    extra: struct
+    {
+        sentinel: ?Node = null,
+        alignment: ?u29 = null,
+        flags: Pointer.Flags = .{ .is_allowzero = false, .is_const = false, .is_volatile = false },
+    },
+) std.mem.Allocator.Error!Node
+{
+    try self.pointers.ensureUnusedCapacity(self.allocator(), 1);
+    const new_index = self.pointers.addOneAssumeCapacity();
+    errdefer self.pointers.shrinkRetainingCapacity(new_index);
+
+    self.pointers.set(new_index, Pointer{
+        .size = size,
+        .alignment = extra.alignment,
+        .child = child,
+        .sentinel = extra.sentinel,
+        .flags = extra.flags,
+    });
+
+    return Node{
+        .index = new_index,
+        .tag = .pointer,
+    };
+}
+
+fn expectNodeFmt(gen: *Generator, expected: []const u8, node: Node) !void
+{
+    return std.testing.expectFmt(expected, "{}", .{gen.fmtNode(node)});
+}
+
 test "fundamentals"
 {
     var gen = Generator.init(std.testing.allocator);
     defer gen.deinit();
 
-    const this_literal = try gen.createLiteral("@This()");
-    _ = try gen.addDecl(false, .none, .@"const", "Self", null, this_literal);
+    try gen.expectNodeFmt("@import(\"foo.zig\")", try gen.createImport("foo.zig"));
+    try gen.expectNodeFmt("type", try gen.primitiveTypeFrom(type));
+    try gen.expectNodeFmt("u32", try gen.intTypeFrom(u32));
+    try gen.expectNodeFmt("@as(u32, 43)",  try gen.createLiteral("@as(u32, 43)"));
+    try gen.expectNodeFmt("&@as(u32, 43)", try gen.addressOf(try gen.createLiteral("@as(u32, 43)")));
 
-    const foo_import = try gen.createImport("foo.zig");
-    const foo_import_decl = try gen.addDecl(false, .none, .@"const", "internal_foo", null, foo_import);
-    _ = try gen.addDecl(true, .none, .@"const", "foo", try gen.createLiteral("type"), foo_import_decl);
-    _ = try gen.addDecl(true, .static, .@"var", "counter", try gen.intType(.unsigned, 32), null);
+    try gen.expectNodeFmt("*u32", try gen.createPointerType(.One, try gen.intTypeFrom(u32), .{}));
+    try gen.expectNodeFmt("[*]u32", try gen.createPointerType(.Many, try gen.intTypeFrom(u32), .{}));
+    try gen.expectNodeFmt("[]u32", try gen.createPointerType(.Slice, try gen.intTypeFrom(u32), .{}));
 
-    try std.testing.expectFmt(
-        \\const Self = @This();
-        \\const internal_foo = @import("foo.zig");
-        \\pub const foo: type = internal_foo;
-        \\pub extern var counter: u32;
-        \\
-    , "{}", .{gen});
+    // try std.testing.expectFmt(
+    //     \\const Self = @This();
+    //     \\const internal_foo = @import("foo.zig");
+    //     \\pub const foo: type = internal_foo;
+    //     \\extern var counter: u32;
+    //     \\
+    // , "{}", .{gen});
 }
