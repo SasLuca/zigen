@@ -2,13 +2,18 @@ const std = @import("std");
 
 const Generator = @This();
 arena: std.heap.ArenaAllocator,
-top_level_nodes: std.ArrayListUnmanaged(Node) = .{},
+top_level_nodes: NodeSet = .{},
 
 raw_literals: std.StringArrayHashMapUnmanaged(void) = .{},
 builtin_calls: std.ArrayListUnmanaged(BuiltinCall) = .{},
-addrofs: std.ArrayListUnmanaged(Node) = .{},
+function_calls: std.ArrayListUnmanaged(FunctionCall) = .{},
+optionals: NodeSet = .{},
+addrofs: NodeSet = .{},
 pointers: std.MultiArrayList(Pointer) = .{},
+dot_accesses: std.ArrayListUnmanaged(DotAccess) = .{},
 decls: std.MultiArrayList(Decl) = .{},
+
+const NodeSet = std.AutoArrayHashMapUnmanaged(Node, void);
 
 pub const Node = struct
 {
@@ -19,24 +24,30 @@ pub const Node = struct
     pub const Index = usize;
     pub const Tag = enum(usize)
     {
+        /// index into field `Generator.raw_literals`.
+        raw_literal,
         /// index is the tag value of a `Generator.PrimitiveType`.
         primitive_type,
         /// index is the number of bits of the unsigned integer.
         unsigned_int,
         /// index is the number of bits of the signed integer.
         signed_int,
-        /// index into field `Generator.raw_literals`.
-        raw_literal,
         /// index into field `Generator.builtin_calls`.
         builtin_call,
-        /// index into field `Generator.pointers`.
-        pointer,
+        /// index into field `Generator.function_calls`.
+        function_call,
+        /// index into field `Generator.optionals`.
+        optional,
         /// index into field `Generator.addrofs`.
         addrof,
+        /// index into field `Generator.pointers`.
+        pointer,
+        /// index into field `Generator.dot_accesses`.
+        dot_access,
         /// index into field `Generator.decls`.
         decl,
         /// index into field `Generator.decls`.
-        decl_alias,
+        decl_ref,
     };
 };
 
@@ -69,6 +80,12 @@ pub const BuiltinCall = struct
     params: []const Node,
 };
 
+pub const FunctionCall = struct
+{
+    callable: Node,
+    params: []const Node,
+};
+
 pub const Pointer = struct
 {
     size: std.builtin.Type.Pointer.Size,
@@ -82,6 +99,12 @@ pub const Pointer = struct
         is_volatile: bool,
         is_allowzero: bool,
     };
+};
+
+pub const DotAccess = struct
+{
+    lhs: Node,
+    rhs: []const []const u8,
 };
 
 pub const Decl = struct
@@ -108,7 +131,6 @@ pub const Decl = struct
     };
 };
 
-
 pub fn init(child_allocator: std.mem.Allocator) Generator
 {
     return .{
@@ -128,7 +150,7 @@ pub fn format(self: Generator, comptime fmt: []const u8, options: std.fmt.Format
     _ = options;
     _ = writer;
 
-    for (self.top_level_nodes.items) |tln|
+    for (self.top_level_nodes.keys()) |tln|
     {
         try writer.print("{}", .{self.fmtNode(tln)});
     }
@@ -159,10 +181,21 @@ fn formatNode(
     const node = fmt_node.node;
     switch (node.tag)
     {
+        .raw_literal => try writer.writeAll(self.raw_literals.keys()[node.index]),
         .primitive_type => try writer.writeAll(@tagName(@intToEnum(PrimitiveType, node.index))),
         .unsigned_int => try writer.print("u{d}", .{@intCast(u16, node.index)}),
         .signed_int => try writer.print("i{d}", .{@intCast(u16, node.index)}),
-        .raw_literal => try writer.writeAll(self.raw_literals.keys()[node.index]),
+        .optional => try writer.print("?{}", .{self.fmtNode(self.optionals.keys()[node.index])}),
+        .addrof => try writer.print("&{}", .{self.fmtNode(self.addrofs.keys()[node.index])}),
+        .dot_access =>
+        {
+            const dot_access: DotAccess = self.dot_accesses.items[node.index];
+            try writer.print("{}", .{self.fmtNode(dot_access.lhs)});
+            for (dot_access.rhs) |rhs|
+            {
+                try writer.print(".{s}", .{std.zig.fmtId(rhs)});
+            }
+        },
         .builtin_call =>
         {
             const builtin_call: BuiltinCall = self.builtin_calls.items[node.index];
@@ -177,74 +210,87 @@ fn formatNode(
             }
             try writer.writeByte(')');
         },
-        .addrof => try writer.print("&{}", .{self.fmtNode(self.addrofs.items[node.index])}),
+        .function_call =>
+        {
+            const function_call: FunctionCall = self.function_calls.items[node.index];
+            try writer.print("{}(", .{self.fmtNode(function_call.callable)});
+            for (function_call.params[0..function_call.params.len - @boolToInt(function_call.params.len != 0)]) |param|
+            {
+                try writer.print("{}, ", .{self.fmtNode(param)});
+            }
+            if (function_call.params.len != 0)
+            {
+                try writer.print("{}", .{self.fmtNode(function_call.params[function_call.params.len - 1])});
+            }
+            try writer.writeByte(')');
+        },
         .pointer =>
         {
             const slice = self.pointers.slice();
-            const sizes: []const std.builtin.Type.Pointer.Size = slice.items(.size);
-            const sentinels: []const ?Node = slice.items(.sentinel);
-            const alignments: []const ?u29 = slice.items(.alignment);
             const flags: []const Pointer.Flags = slice.items(.flags);
             const children: []const Node = slice.items(.child);
 
-            var maybe_current_index: ?Node.Index = node.index;
-            while (maybe_current_index) |idx|
+            const pointer = Pointer{
+                .size = slice.items(.size)[node.index],
+                .sentinel = slice.items(.sentinel)[node.index],
+                .alignment = slice.items(.alignment)[node.index],
+                .flags = .{
+                    .is_allowzero = flags[node.index].is_allowzero,
+                    .is_const = flags[node.index].is_const,
+                    .is_volatile = flags[node.index].is_volatile,
+                },
+                .child = children[node.index],
+            };
+
+            switch (pointer.size)
             {
-                const size: std.builtin.Type.Pointer.Size = sizes[idx];
-                const sentinel: ?Node = sentinels[idx];
-                const is_allowzero: bool = flags[idx].is_allowzero;
-                const alignment: ?u29 = alignments[idx];
-                const is_const: bool = flags[idx].is_const;
-                const is_volatile: bool = flags[idx].is_volatile;
+                .C =>
+                {
+                    std.debug.assert(pointer.sentinel == null);
+                    std.debug.assert(!pointer.flags.is_allowzero);
+                },
+                .One => std.debug.assert(pointer.sentinel == null),
+                .Many, .Slice => {},
+            }
+            switch (pointer.size)
+            {
+                .One => try writer.writeByte('*'),
+                .Many =>
+                {
+                    try if (pointer.sentinel) |s|
+                        writer.print("[*:{}]", .{self.fmtNode(s)})
+                    else
+                        writer.writeAll("[*]");
+                },
+                .Slice =>
+                {
+                    try if (pointer.sentinel) |s|
+                        writer.print("[:{}]", .{self.fmtNode(s)})
+                    else
+                        writer.writeAll("[]"); 
+                },
+                .C => try writer.writeAll("[*c]"),
+            }
+            if (pointer.flags.is_allowzero) try writer.writeAll("allowzero ");
+            if (pointer.alignment) |a| try writer.print("align({}) ", .{a});
+            if (pointer.flags.is_const) try writer.writeAll("const ");
+            if (pointer.flags.is_volatile) try writer.writeAll("volatile ");
 
-                switch (size)
-                {
-                    .C =>
-                    {
-                        std.debug.assert(sentinel == null);
-                        std.debug.assert(!is_allowzero);
-                    },
-                    .One => std.debug.assert(sentinel == null),
-                    .Many, .Slice => {},
-                }
-                switch (size)
-                {
-                    .One => try writer.writeByte('*'),
-                    .Many =>
-                    {
-                        try if (sentinels[idx]) |s|
-                            writer.print("[*:{}]", .{self.fmtNode(s)})
-                        else
-                            writer.writeAll("[*]");
-                    },
-                    .Slice =>
-                    {
-                        try if (sentinels[idx]) |s|
-                            writer.print("[:{}]", .{self.fmtNode(s)})
-                        else
-                            writer.writeAll("[]"); 
-                    },
-                    .C => try writer.writeAll("[*c]"),
-                }
-                if (is_allowzero) try writer.writeAll("allowzero ");
-                if (alignment) |a| try writer.print("align({}) ", .{a});
-                if (is_const) try writer.writeAll("const ");
-                if (is_volatile) try writer.writeAll("volatile ");
-
-                maybe_current_index = null;
-                switch (children[idx].tag)
-                {
-                    .primitive_type,
-                    .unsigned_int,
-                    .signed_int,
-                    .raw_literal,
-                    .builtin_call,
-                    .decl,
-                    .decl_alias,
-                    => try writer.print("{}", .{self.fmtNode(children[idx])}),
-                    .addrof => unreachable,
-                    .pointer => maybe_current_index = children[idx].index,
-                }
+            switch (pointer.child.tag)
+            {
+                .primitive_type,
+                .unsigned_int,
+                .signed_int,
+                .raw_literal,
+                .builtin_call,
+                .function_call,
+                .decl,
+                .decl_ref,
+                .optional,
+                .pointer,
+                .dot_access,
+                => try writer.print("{}", .{self.fmtNode(children[node.index])}),
+                .addrof => unreachable,
             }
         },
         .decl =>
@@ -277,7 +323,7 @@ fn formatNode(
                 },
             }
         },
-        .decl_alias =>
+        .decl_ref =>
         {
             const slice = self.decls.slice();
             const names: []const []const u8 = slice.items(.name);
@@ -404,13 +450,40 @@ pub fn createBuiltinCall(self: *Generator, builtin_name: []const u8, params: []c
     };
 }
 
-
-pub fn addressOf(self: *Generator, node: Node) std.mem.Allocator.Error!Node
+pub fn createFunctionCall(self: *Generator, callable: Node, params: []const Node) std.mem.Allocator.Error!Node
 {
-    const new_index = self.addrofs.items.len;
-    try self.addrofs.append(self.allocator(), node);
+    const new_index = self.function_calls.items.len;
+    const new = try self.function_calls.addOne(self.allocator());
+    errdefer _ = self.function_calls.pop();
+
+    const duped_params = try self.allocator().dupe(Node, params);
+    errdefer self.allocator().free(duped_params);
+
+    new.* = .{
+        .callable = callable,
+        .params = duped_params,
+    };
+
     return Node{
         .index = new_index,
+        .tag = .function_call,
+    };
+}
+
+pub fn createOptionalType(self: *Generator, node: Node) std.mem.Allocator.Error!Node
+{
+    const gop = try self.optionals.getOrPut(self.allocator(), node);
+    return Node{
+        .index = gop.index,
+        .tag = .optional,
+    };
+}
+
+pub fn createAddressOf(self: *Generator, node: Node) std.mem.Allocator.Error!Node
+{
+    const gop = try self.addrofs.getOrPut(self.allocator(), node);
+    return Node{
+        .index = gop.index,
         .tag = .addrof,
     };
 }
@@ -445,7 +518,67 @@ pub fn createPointerType(
     };
 }
 
+pub fn createDotAccess(
+    self: *Generator,
+    lhs: Node,
+    rhs: []const []const u8,
+) std.mem.Allocator.Error!Node
+{
+    const new_index = self.dot_accesses.items.len;
+    const new_dot_access = try self.dot_accesses.addOne(self.allocator());
+    errdefer _ = self.dot_accesses.pop();
+
+    var strings = try std.ArrayList([]const u8).initCapacity(self.allocator(), rhs.len);
+    errdefer strings.deinit();
+
+    var linear_str = std.ArrayList(u8).init(self.allocator());
+    errdefer linear_str.deinit();
+    try linear_str.ensureUnusedCapacity(capacity: {
+        var capacity: usize = 0;
+        for (rhs) |str| capacity += str.len;
+        break :capacity capacity;
+    });
+
+    for (rhs) |str|
+    {
+        const start = linear_str.items.len;
+        linear_str.appendSliceAssumeCapacity(str);
+        const end = linear_str.items.len;
+        strings.appendAssumeCapacity(linear_str.items[start..end]);
+    }
+
+    new_dot_access.* = .{
+        .lhs = lhs,
+        .rhs = strings.toOwnedSlice(),
+    };
+    return Node{
+        .index = new_index,
+        .tag = .dot_access,
+    };
+}
+
 pub const Mutability = enum { Var, Const };
+pub fn addDecl(
+    self: *Generator,
+    is_pub: bool,
+    mutability: Mutability,
+    name: []const u8,
+    type_annotation: ?Node,
+    value: Node,
+) std.mem.Allocator.Error!Node
+{
+    const decl_node = try self.createDeclaration(null, is_pub, .none, mutability, name, type_annotation, value);
+    errdefer {
+        self.decls.shrinkRetainingCapacity(self.decls.len - 1);
+        std.debug.assert(self.decls.len == decl_node.index);
+    }
+
+    try self.top_level_nodes.putNoClobber(self.allocator(), decl_node, {});
+    return Node{
+        .index = decl_node.index,
+        .tag = .decl_ref,
+    };
+}
 
 fn createDeclaration(
     self: *Generator,
@@ -489,29 +622,10 @@ fn createDeclaration(
         .type_annotation = type_annotation,
         .value = value,
     });
-    
+
     return Node{
         .index = new_index,
         .tag = .decl,
-    };
-}
-
-pub fn addDecl(
-    self: *Generator,
-    is_pub: bool,
-    mutability: Mutability,
-    name: []const u8,
-    type_annotation: ?Node,
-    value: Node,
-) std.mem.Allocator.Error!Node
-{
-    const new_tldn = try self.top_level_nodes.addOne(self.allocator());
-    errdefer _ = self.top_level_nodes.pop();
-
-    new_tldn.* = try self.createDeclaration(null, is_pub, .none, mutability, name, type_annotation, value);
-    return Node{
-        .index = new_tldn.index,
-        .tag = .decl_alias,
     };
 }
 
@@ -529,9 +643,11 @@ test "node printing"
     try gen.expectNodeFmt("type", try gen.primitiveTypeFrom(type));
     try gen.expectNodeFmt("u32", try gen.intTypeFrom(u32));
     try gen.expectNodeFmt("@as(u32, 43)",  try gen.createLiteral("@as(u32, 43)"));
-    try gen.expectNodeFmt("&@as(u32, 43)", try gen.addressOf(try gen.createLiteral("@as(u32, 43)")));
+    try gen.expectNodeFmt("&@as(u32, 43)", try gen.createAddressOf(try gen.createLiteral("@as(u32, 43)")));
 
     try gen.expectNodeFmt("*u32", try gen.createPointerType(.One, try gen.intTypeFrom(u32), .{}));
+    try gen.expectNodeFmt("?*u32", try gen.createOptionalType(try gen.createPointerType(.One, try gen.intTypeFrom(u32), .{})));
+
     try gen.expectNodeFmt("[*]u32", try gen.createPointerType(.Many, try gen.intTypeFrom(u32), .{}));
     try gen.expectNodeFmt("[]u32", try gen.createPointerType(.Slice, try gen.intTypeFrom(u32), .{}));
     try gen.expectNodeFmt("[:0]u32", try gen.createPointerType(.Slice, try gen.intTypeFrom(u32), .{
@@ -592,11 +708,18 @@ test "top level decls"
     var gen = Generator.init(std.testing.allocator);
     defer gen.deinit();
 
+    const std_import = try gen.addDecl(false, .Const, "std", null, try gen.createBuiltinCall("import", &.{ try gen.createLiteral("\"std\"") }));
+    const array_list_ref_decl = try gen.addDecl(false, .Const, "ArrayList", null, try gen.createDotAccess(std_import, &.{ "ArrayList" }));
+    _ = try gen.addDecl(true, .Const, "String", null, try gen.createFunctionCall(array_list_ref_decl, &.{ try gen.intTypeFrom(u8) }));
+
     const foo_decl = try gen.addDecl(false, .Const, "foo", null, try gen.createLiteral("3"));
     const bar_decl = try gen.addDecl(false, .Var, "bar", try gen.intTypeFrom(u32), foo_decl);
-    _ = try gen.addDecl(true, .Const, "p_bar", try gen.createPointerType(.One, try gen.intTypeFrom(u32), .{}), try gen.addressOf(bar_decl));
+    _ = try gen.addDecl(true, .Const, "p_bar", try gen.createPointerType(.One, try gen.intTypeFrom(u32), .{}), try gen.createAddressOf(bar_decl));
 
     try std.testing.expectFmt(
+        \\const std = @import("std");
+        \\const ArrayList = std.ArrayList;
+        \\pub const String = ArrayList(u8);
         \\const foo = 3;
         \\var bar: u32 = foo;
         \\pub const p_bar: *u32 = &bar;
