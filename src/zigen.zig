@@ -5,7 +5,7 @@ arena: std.heap.ArenaAllocator,
 top_level_nodes: std.ArrayListUnmanaged(Node) = .{},
 
 raw_literals: std.StringArrayHashMapUnmanaged(void) = .{},
-imports: std.StringArrayHashMapUnmanaged(void) = .{},
+builtin_calls: std.ArrayListUnmanaged(BuiltinCall) = .{},
 addrofs: std.ArrayListUnmanaged(Node) = .{},
 pointers: std.MultiArrayList(Pointer) = .{},
 decls: std.MultiArrayList(Decl) = .{},
@@ -27,8 +27,8 @@ pub const Node = struct
         signed_int,
         /// index into field `Generator.raw_literals`.
         raw_literal,
-        /// index into field `Generator.imports`.
-        import,
+        /// index into field `Generator.builtin_calls`.
+        builtin_call,
         /// index into field `Generator.pointers`.
         pointer,
         /// index into field `Generator.addrofs`.
@@ -61,6 +61,12 @@ pub const PrimitiveType = enum
     @"anyerror",
     @"comptime_int",
     @"comptime_float",
+};
+
+pub const BuiltinCall = struct
+{
+    name: []const u8,
+    params: []const Node,
 };
 
 pub const Pointer = struct
@@ -157,7 +163,20 @@ fn formatNode(
         .unsigned_int => try writer.print("u{d}", .{@intCast(u16, node.index)}),
         .signed_int => try writer.print("i{d}", .{@intCast(u16, node.index)}),
         .raw_literal => try writer.writeAll(self.raw_literals.keys()[node.index]),
-        .import => try writer.print("@import(\"{s}\")", .{self.imports.keys()[node.index]}),
+        .builtin_call =>
+        {
+            const builtin_call: BuiltinCall = self.builtin_calls.items[node.index];
+            try writer.print("@{s}(", .{builtin_call.name});
+            for (builtin_call.params[0..builtin_call.params.len - @boolToInt(builtin_call.params.len != 0)]) |param|
+            {
+                try writer.print("{}, ", .{self.fmtNode(param)});
+            }
+            if (builtin_call.params.len != 0)
+            {
+                try writer.print("{}", .{self.fmtNode(builtin_call.params[builtin_call.params.len - 1])});
+            }
+            try writer.writeByte(')');
+        },
         .addrof => try writer.print("&{}", .{self.fmtNode(self.addrofs.items[node.index])}),
         .pointer =>
         {
@@ -219,7 +238,7 @@ fn formatNode(
                     .unsigned_int,
                     .signed_int,
                     .raw_literal,
-                    .import,
+                    .builtin_call,
                     .decl,
                     .decl_alias,
                     => try writer.print("{}", .{self.fmtNode(children[idx])}),
@@ -362,19 +381,29 @@ pub fn createLiteral(self: *Generator, literal_str: []const u8) std.mem.Allocato
     };
 }
 
-pub fn createImport(self: *Generator, import_str: []const u8) std.mem.Allocator.Error!Node
+pub fn createBuiltinCall(self: *Generator, builtin_name: []const u8, params: []const Node) std.mem.Allocator.Error!Node
 {
-    const gop = try self.imports.getOrPut(self.allocator(), import_str);
-    if (!gop.found_existing)
-    {
-        gop.key_ptr.* = try self.allocator().dupe(u8, import_str);
-    }
+    const new_index = self.builtin_calls.items.len;
+    const new = try self.builtin_calls.addOne(self.allocator());
+    errdefer _ = self.builtin_calls.pop();
+
+    const duped_name = try self.allocator().dupe(u8, builtin_name);
+    errdefer self.allocator().free(duped_name);
+
+    const duped_params = try self.allocator().dupe(Node, params);
+    errdefer self.allocator().free(duped_params);
+
+    new.* = .{
+        .name = duped_name,
+        .params = duped_params,
+    };
 
     return Node{
-        .index = gop.index,
-        .tag = .import,
+        .index = new_index,
+        .tag = .builtin_call,
     };
 }
+
 
 pub fn addressOf(self: *Generator, node: Node) std.mem.Allocator.Error!Node
 {
@@ -496,7 +525,7 @@ test "node printing"
     var gen = Generator.init(std.testing.allocator);
     defer gen.deinit();
 
-    try gen.expectNodeFmt("@import(\"foo.zig\")", try gen.createImport("foo.zig"));
+    try gen.expectNodeFmt("@This()", try gen.createBuiltinCall("This", &.{}));
     try gen.expectNodeFmt("type", try gen.primitiveTypeFrom(type));
     try gen.expectNodeFmt("u32", try gen.intTypeFrom(u32));
     try gen.expectNodeFmt("@as(u32, 43)",  try gen.createLiteral("@as(u32, 43)"));
