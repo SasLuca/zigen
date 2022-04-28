@@ -2,25 +2,13 @@ const std = @import("std");
 
 const Generator = @This();
 arena: std.heap.ArenaAllocator,
-/// indexes into `Generator.decls`
-top_level_decl_indices: std.ArrayListUnmanaged(TopLevelNode) = .{},
+top_level_nodes: std.ArrayListUnmanaged(Node) = .{},
 
 raw_literals: std.StringArrayHashMapUnmanaged(void) = .{},
 imports: std.StringArrayHashMapUnmanaged(void) = .{},
 addrofs: std.ArrayListUnmanaged(Node) = .{},
 pointers: std.MultiArrayList(Pointer) = .{},
-
-pub const TopLevelNode = struct
-{
-    index: TopLevelNode.Index,
-    tag: TopLevelNode.Tag,
-
-    pub const Index = usize;
-    pub const Tag = enum(usize)
-    {
-        const_decl,
-    };
-};
+decls: std.MultiArrayList(Decl) = .{},
 
 pub const Node = struct
 {
@@ -45,6 +33,10 @@ pub const Node = struct
         pointer,
         /// index into field `Generator.addrofs`.
         addrof,
+        /// index into field `Generator.decls`.
+        decl,
+        /// index into field `Generator.decls`.
+        decl_alias,
     };
 };
 
@@ -90,16 +82,22 @@ pub const Decl = struct
 {
     /// refers to the index of the parent container declaration, with 'null' meaning file scope.
     parent_index: ?Node.Index,
-    extern_lib_str: ?[]const u8,
+    extern_mod: ExternMod,
     flags: Decl.Flags,
     name: []const u8,
     type_annotation: ?Node,
-    value: Node,
+    value: ?Node,
+
+    pub const ExternMod = union(enum)
+    {
+        none,
+        static,
+        dyn: []const u8,
+    };
 
     pub const Flags = extern struct
     {
         is_pub: bool,
-        is_extern: bool,
         is_const: bool,
     };
 };
@@ -123,6 +121,11 @@ pub fn format(self: Generator, comptime fmt: []const u8, options: std.fmt.Format
     _ = fmt;
     _ = options;
     _ = writer;
+
+    for (self.top_level_nodes.items) |tln|
+    {
+        try writer.print("{}", .{self.fmtNode(tln)});
+    }
 }
 
 fn fmtNode(self: *const Generator, node: Node) std.fmt.Formatter(formatNode)
@@ -168,16 +171,35 @@ fn formatNode(
             var maybe_current_index: ?Node.Index = node.index;
             while (maybe_current_index) |idx|
             {
-                switch (sizes[idx])
+                const size: std.builtin.Type.Pointer.Size = sizes[idx];
+                const sentinel: ?Node = sentinels[idx];
+                const is_allowzero: bool = flags[idx].is_allowzero;
+                const alignment: ?u29 = alignments[idx];
+                const is_const: bool = flags[idx].is_const;
+                const is_volatile: bool = flags[idx].is_volatile;
+
+                switch (size)
+                {
+                    .C =>
+                    {
+                        std.debug.assert(sentinel == null);
+                        std.debug.assert(!is_allowzero);
+                    },
+                    .One => std.debug.assert(sentinel == null),
+                    .Many, .Slice => {},
+                }
+                switch (size)
                 {
                     .One => try writer.writeByte('*'),
-                    .Many => {
+                    .Many =>
+                    {
                         try if (sentinels[idx]) |s|
                             writer.print("[*:{}]", .{self.fmtNode(s)})
                         else
                             writer.writeAll("[*]");
                     },
-                    .Slice => {
+                    .Slice =>
+                    {
                         try if (sentinels[idx]) |s|
                             writer.print("[:{}]", .{self.fmtNode(s)})
                         else
@@ -185,10 +207,10 @@ fn formatNode(
                     },
                     .C => try writer.writeAll("[*c]"),
                 }
-                if (flags[idx].is_allowzero) try writer.writeAll("allowzero ");
-                if (alignments[idx]) |alignment| try writer.print("align({}) ", .{alignment});
-                if (flags[idx].is_const) try writer.writeAll("const ");
-                if (flags[idx].is_volatile) try writer.writeAll("volatile ");
+                if (is_allowzero) try writer.writeAll("allowzero ");
+                if (alignment) |a| try writer.print("align({}) ", .{a});
+                if (is_const) try writer.writeAll("const ");
+                if (is_volatile) try writer.writeAll("volatile ");
 
                 maybe_current_index = null;
                 switch (children[idx].tag)
@@ -198,11 +220,95 @@ fn formatNode(
                     .signed_int,
                     .raw_literal,
                     .import,
+                    .decl,
+                    .decl_alias,
                     => try writer.print("{}", .{self.fmtNode(children[idx])}),
                     .addrof => unreachable,
                     .pointer => maybe_current_index = children[idx].index,
                 }
             }
+        },
+        .decl =>
+        {
+            const decl: Decl = self.decls.get(node.index);
+            if (decl.flags.is_pub) try writer.writeAll("pub ");
+            switch (decl.extern_mod) {
+                .none =>
+                {
+                    try writer.writeAll(if (decl.flags.is_const) "const " else "var ");
+                    try writer.print("{s}", .{std.zig.fmtId(decl.name)});
+                    if (decl.type_annotation) |ta| try writer.print(": {}", .{self.fmtNode(ta)});
+                    try writer.print(" = {};\n", .{self.fmtNode(decl.value.?)});
+                },
+                .static =>
+                {
+                    try writer.writeAll("extern ");
+                    try writer.writeAll(if (decl.flags.is_const) "const " else "var ");
+                    try writer.print("{s}", .{std.zig.fmtId(decl.name)});
+                    try writer.print(": {};\n", .{self.fmtNode(decl.type_annotation.?)});
+                    std.debug.assert(decl.value == null);
+                },
+                .dyn => |lib_str|
+                {
+                    try writer.print("extern \"{s}\" ", .{lib_str});
+                    try writer.writeAll(if (decl.flags.is_const) "const " else "var ");
+                    try writer.print("{s}", .{std.zig.fmtId(decl.name)});
+                    try writer.print(": {};\n", .{self.fmtNode(decl.type_annotation.?)});
+                    std.debug.assert(decl.value == null);
+                },
+            }
+        },
+        .decl_alias =>
+        {
+            const slice = self.decls.slice();
+            const names: []const []const u8 = slice.items(.name);
+
+            const ParentIndexIterator = struct
+            {
+                const ParentIndexIterator = @This();
+                parent_indices: []const ?Node.Index,
+                current_parent_idx: ?usize,
+
+                fn next(it: *ParentIndexIterator) ?Node.Index
+                {
+                    if (it.current_parent_idx) |idx|
+                    {
+                        it.current_parent_idx = it.parent_indices[idx];
+                        return idx;
+                    } else return null;
+                }
+            };
+            const init_parent_index_iterator = ParentIndexIterator{
+                .parent_indices = slice.items(.parent_index),
+                .current_parent_idx = slice.items(.parent_index)[node.index],
+            };
+
+            const parent_count: usize = parent_count: {
+                var parent_count: usize = 0;
+
+                var iter = init_parent_index_iterator;
+                while (iter.next()) |_| parent_count += 1;
+                break :parent_count parent_count;
+            };
+
+            {
+                var i_limit: usize = 0;
+                while (i_limit < parent_count) : (i_limit += 1)
+                {
+                    var iter = init_parent_index_iterator;
+
+                    var i: usize = parent_count;
+                    while (true)
+                    {
+                        if (i == i_limit) break;
+                        i -= 1;
+
+                        const parent_idx = iter.next() orelse break;
+                        try writer.print("{s}.", .{std.zig.fmtId(names[parent_idx])});
+                    }
+                }
+            }
+            try writer.print("{s}", .{std.zig.fmtId(names[node.index])});
         },
     }
 }
@@ -310,12 +416,82 @@ pub fn createPointerType(
     };
 }
 
+pub const Mutability = enum { Var, Const };
+
+fn createDeclaration(
+    self: *Generator,
+    parent_index: ?Node.Index,
+    is_pub: bool,
+    extern_mod: Decl.ExternMod,
+    mutability: Mutability,
+    name: []const u8,
+    type_annotation: ?Node,
+    value: ?Node,
+) std.mem.Allocator.Error!Node
+{
+    try self.decls.ensureUnusedCapacity(self.allocator(), 1);
+    const new_index = self.decls.addOneAssumeCapacity();
+    errdefer self.decls.shrinkRetainingCapacity(new_index);
+
+    const duped_extern_mod: Decl.ExternMod = switch (extern_mod)
+    {
+        .none, .static => extern_mod,
+        .dyn => |str| Decl.ExternMod{
+            .dyn = try self.allocator().dupe(u8, str),
+        },
+    };
+    errdefer {
+        const str = switch (duped_extern_mod)
+        {
+            .none, .static => &[_]u8{},
+            .dyn => |str| str,
+        };
+        self.allocator().free(str);
+    }
+
+    const duped_name = try self.allocator().dupe(u8, name);
+    errdefer self.allocator().free(duped_name);
+
+    self.decls.set(new_index, Decl{
+        .parent_index = parent_index,
+        .extern_mod = duped_extern_mod,
+        .flags = .{ .is_pub = is_pub, .is_const = mutability == .Const },
+        .name = duped_name,
+        .type_annotation = type_annotation,
+        .value = value,
+    });
+    
+    return Node{
+        .index = new_index,
+        .tag = .decl,
+    };
+}
+
+pub fn addDecl(
+    self: *Generator,
+    is_pub: bool,
+    mutability: Mutability,
+    name: []const u8,
+    type_annotation: ?Node,
+    value: Node,
+) std.mem.Allocator.Error!Node
+{
+    const new_tldn = try self.top_level_nodes.addOne(self.allocator());
+    errdefer _ = self.top_level_nodes.pop();
+
+    new_tldn.* = try self.createDeclaration(null, is_pub, .none, mutability, name, type_annotation, value);
+    return Node{
+        .index = new_tldn.index,
+        .tag = .decl_alias,
+    };
+}
+
 fn expectNodeFmt(gen: *Generator, expected: []const u8, node: Node) !void
 {
     return std.testing.expectFmt(expected, "{}", .{gen.fmtNode(node)});
 }
 
-test "fundamentals"
+test "node printing"
 {
     var gen = Generator.init(std.testing.allocator);
     defer gen.deinit();
@@ -329,12 +505,72 @@ test "fundamentals"
     try gen.expectNodeFmt("*u32", try gen.createPointerType(.One, try gen.intTypeFrom(u32), .{}));
     try gen.expectNodeFmt("[*]u32", try gen.createPointerType(.Many, try gen.intTypeFrom(u32), .{}));
     try gen.expectNodeFmt("[]u32", try gen.createPointerType(.Slice, try gen.intTypeFrom(u32), .{}));
+    try gen.expectNodeFmt("[:0]u32", try gen.createPointerType(.Slice, try gen.intTypeFrom(u32), .{
+        .sentinel = try gen.createLiteral("0"),
+    }));
+    try gen.expectNodeFmt("[:0]align(16) u32", try gen.createPointerType(.Slice, try gen.intTypeFrom(u32), .{
+        .sentinel = try gen.createLiteral("0"),
+        .alignment = 16,
+    }));
+    try gen.expectNodeFmt("[:0]allowzero align(16) u32", try gen.createPointerType(.Slice, try gen.intTypeFrom(u32), .{
+        .sentinel = try gen.createLiteral("0"),
+        .alignment = 16,
+        .flags = .{ .is_allowzero = true, .is_const = false, .is_volatile = false },
+    }));
+    try gen.expectNodeFmt("[:0]allowzero align(16) const u32", try gen.createPointerType(.Slice, try gen.intTypeFrom(u32), .{
+        .sentinel = try gen.createLiteral("0"),
+        .alignment = 16,
+        .flags = .{ .is_allowzero = true, .is_const = true, .is_volatile = false },
+    }));
+    try gen.expectNodeFmt("[:0]allowzero align(16) const volatile u32", try gen.createPointerType(.Slice, try gen.intTypeFrom(u32), .{
+        .sentinel = try gen.createLiteral("0"),
+        .alignment = 16,
+        .flags = .{ .is_allowzero = true, .is_const = true, .is_volatile = true },
+    }));
 
-    // try std.testing.expectFmt(
-    //     \\const Self = @This();
-    //     \\const internal_foo = @import("foo.zig");
-    //     \\pub const foo: type = internal_foo;
-    //     \\extern var counter: u32;
-    //     \\
-    // , "{}", .{gen});
+    try gen.expectNodeFmt(
+        "const foo = 3;\n",
+        try gen.createDeclaration(null, false, .none, .Const, "foo", null, try gen.createLiteral("3")),
+    );
+    try gen.expectNodeFmt(
+        "pub const foo = 3;\n",
+        try gen.createDeclaration(null, true, .none, .Const, "foo", null, try gen.createLiteral("3")),
+    );
+    try gen.expectNodeFmt(
+        "pub const foo = 3;\n",
+        try gen.createDeclaration(null, true, .none, .Const, "foo", null, try gen.createLiteral("3")),
+    );
+    try gen.expectNodeFmt(
+        "pub const foo: u32 = 3;\n",
+        try gen.createDeclaration(null, true, .none, .Const, "foo", try gen.intTypeFrom(u32), try gen.createLiteral("3")),
+    );
+    try gen.expectNodeFmt(
+        "pub var foo: u32 = 3;\n",
+        try gen.createDeclaration(null, true, .none, .Var, "foo", try gen.intTypeFrom(u32), try gen.createLiteral("3")),
+    );
+    try gen.expectNodeFmt(
+        "pub extern var foo: u32;\n",
+        try gen.createDeclaration(null, true, .static, .Var, "foo", try gen.intTypeFrom(u32), null),
+    );
+    try gen.expectNodeFmt(
+        "pub extern const foo: u32;\n",
+        try gen.createDeclaration(null, true, .static, .Const, "foo", try gen.intTypeFrom(u32), null),
+    );
+}
+
+test "top level decls"
+{
+    var gen = Generator.init(std.testing.allocator);
+    defer gen.deinit();
+
+    const foo_decl = try gen.addDecl(false, .Const, "foo", null, try gen.createLiteral("3"));
+    const bar_decl = try gen.addDecl(false, .Var, "bar", try gen.intTypeFrom(u32), foo_decl);
+    _ = try gen.addDecl(true, .Const, "p_bar", try gen.createPointerType(.One, try gen.intTypeFrom(u32), .{}), try gen.addressOf(bar_decl));
+
+    try std.testing.expectFmt(
+        \\const foo = 3;
+        \\var bar: u32 = foo;
+        \\pub const p_bar: *u32 = &bar;
+        \\
+    , "{}", .{gen});
 }
