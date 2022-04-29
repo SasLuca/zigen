@@ -16,6 +16,7 @@ pointers: std.MultiArrayList(Pointer) = .{},
 parentheses_expressions: NodeSet = .{},
 dot_accesses: std.ArrayListUnmanaged(DotAccess) = .{},
 decls: std.MultiArrayList(Decl) = .{},
+usingnamespace_statements: NodeSet = .{},
 
 /// referenced by `Generator.builtin_calls` and `Generator.function_calls`.
 contiguous_param_lists: std.ArrayListUnmanaged(Node) = .{},
@@ -81,6 +82,8 @@ const Node = extern struct
         decl,
         /// index into field `Generator.decls`.
         decl_ref,
+        /// index into field `Generator.usingnamespace_statements`.
+        usingnamespace_statement,
     };
 };
 
@@ -185,7 +188,6 @@ const PostfixOp = extern struct
     const Tag = enum(u8) { @".?", @".*" };
 };
 
-
 const BuiltinCall = struct
 {
     name: []const u8,
@@ -268,7 +270,9 @@ pub fn format(self: Generator, comptime fmt: []const u8, options: std.fmt.Format
     {
         switch (tln.tag)
         {
-            .decl => try writer.print("{}", .{self.fmtDeclNode(tln.index)}),
+            .decl,
+            .usingnamespace_statement,
+            => try writer.print("{}", .{self.fmtStatementNode(tln)}),
             else => unreachable,
         }
     }
@@ -277,17 +281,18 @@ pub fn format(self: Generator, comptime fmt: []const u8, options: std.fmt.Format
 fn fmtExprNode(self: *const Generator, node: Node) std.fmt.Formatter(formatExprNode)
 {
     std.debug.assert(node.tag != .decl);
+    std.debug.assert(node.tag != .usingnamespace_statement);
     return .{
-        .data = FormattableNode{
+        .data = FormattableExprNode{
             .gen = self,
             .node = node,
         },
     };
 }
 
-const FormattableNode = struct { gen: *const Generator, node: Node };
+const FormattableExprNode = struct { gen: *const Generator, node: Node };
 fn formatExprNode(
-    fmt_node: FormattableNode,
+    fmt_node: FormattableExprNode,
     comptime fmt: []const u8,
     options: std.fmt.FormatOptions,
     writer: anytype,
@@ -422,6 +427,7 @@ fn formatExprNode(
                 .primitive_value => unreachable,
                 .prefix_op => unreachable,
                 .decl => unreachable,
+                .usingnamespace_statement => unreachable,
             }
         },
         .parentheses_expression => try writer.print("({})", .{self.fmtExprNode(self.parentheses_expressions.keys()[node.index])}),
@@ -487,22 +493,23 @@ fn formatExprNode(
             }
             try writer.print("{s}", .{std.zig.fmtId(names[node.index])});
         },
+        .usingnamespace_statement => unreachable,
     }
 }
 
-fn fmtDeclNode(self: *const Generator, decl_index: Node.Index) std.fmt.Formatter(formatDeclNode)
+fn fmtStatementNode(self: *const Generator, node: Node) std.fmt.Formatter(formatDeclNode)
 {
     return .{
-        .data = FormattableDecl{
+        .data = FormattableStatementNode{
             .gen = self,
-            .index = decl_index,
+            .node = node,
         },
     };
 }
 
-const FormattableDecl = struct { gen: *const Generator, index: Node.Index };
+const FormattableStatementNode = struct { gen: *const Generator, node: Node };
 fn formatDeclNode(
-    fmt_decl: FormattableDecl,
+    fmt_decl: FormattableStatementNode,
     comptime fmt: []const u8,
     options: std.fmt.FormatOptions,
     writer: anytype,
@@ -512,33 +519,41 @@ fn formatDeclNode(
     _ = options;
 
     const self = fmt_decl.gen;
-    const decl: Decl = self.decls.get(fmt_decl.index);
-
-    if (decl.flags.is_pub) try writer.writeAll("pub ");
-    switch (decl.extern_mod) {
-        .none =>
+    const node = fmt_decl.node;
+    switch (node.tag)
+    {
+        .decl =>
         {
-            try writer.writeAll(if (decl.flags.is_const) "const " else "var ");
-            try writer.print("{s}", .{std.zig.fmtId(decl.name)});
-            if (decl.type_annotation) |ta| try writer.print(": {}", .{self.fmtExprNode(ta)});
-            try writer.print(" = {};\n", .{self.fmtExprNode(decl.value.?)});
+            const decl: Decl = self.decls.get(node.index);
+            if (decl.flags.is_pub) try writer.writeAll("pub ");
+            switch (decl.extern_mod) {
+                .none =>
+                {
+                    try writer.writeAll(if (decl.flags.is_const) "const " else "var ");
+                    try writer.print("{s}", .{std.zig.fmtId(decl.name)});
+                    if (decl.type_annotation) |ta| try writer.print(": {}", .{self.fmtExprNode(ta)});
+                    try writer.print(" = {};\n", .{self.fmtExprNode(decl.value.?)});
+                },
+                .static =>
+                {
+                    try writer.writeAll("extern ");
+                    try writer.writeAll(if (decl.flags.is_const) "const " else "var ");
+                    try writer.print("{s}", .{std.zig.fmtId(decl.name)});
+                    try writer.print(": {};\n", .{self.fmtExprNode(decl.type_annotation.?)});
+                    std.debug.assert(decl.value == null);
+                },
+                .dyn => |lib_str|
+                {
+                    try writer.print("extern \"{s}\" ", .{lib_str});
+                    try writer.writeAll(if (decl.flags.is_const) "const " else "var ");
+                    try writer.print("{s}", .{std.zig.fmtId(decl.name)});
+                    try writer.print(": {};\n", .{self.fmtExprNode(decl.type_annotation.?)});
+                    std.debug.assert(decl.value == null);
+                },
+            }
         },
-        .static =>
-        {
-            try writer.writeAll("extern ");
-            try writer.writeAll(if (decl.flags.is_const) "const " else "var ");
-            try writer.print("{s}", .{std.zig.fmtId(decl.name)});
-            try writer.print(": {};\n", .{self.fmtExprNode(decl.type_annotation.?)});
-            std.debug.assert(decl.value == null);
-        },
-        .dyn => |lib_str|
-        {
-            try writer.print("extern \"{s}\" ", .{lib_str});
-            try writer.writeAll(if (decl.flags.is_const) "const " else "var ");
-            try writer.print("{s}", .{std.zig.fmtId(decl.name)});
-            try writer.print(": {};\n", .{self.fmtExprNode(decl.type_annotation.?)});
-            std.debug.assert(decl.value == null);
-        },
+        .usingnamespace_statement => try writer.print("usingnamespace {};\n", .{self.fmtExprNode(self.usingnamespace_statements.keys()[node.index])}),
+        else => unreachable,
     }
 }
 
@@ -815,6 +830,22 @@ pub fn addDecl(
     };
 }
 
+pub fn addUsingnamespace(self: *Generator, target: Node) std.mem.Allocator.Error!void
+{
+    const usingnamespace_node = try self.createUsingnamespace(target);
+    errdefer _ = self.usingnamespace_statements.pop();
+    try self.top_level_nodes.putNoClobber(self.allocator(), usingnamespace_node, {});
+}
+
+pub fn createUsingnamespace(self: *Generator, target: Node) std.mem.Allocator.Error!Node
+{
+    const gop = try self.usingnamespace_statements.getOrPut(self.allocator(), target);
+    return Node{
+        .index = gop.index,
+        .tag = .usingnamespace_statement,
+    };
+}
+
 fn createDeclaration(
     self: *Generator,
     parent_index: ?Node.Index,
@@ -867,7 +898,7 @@ fn createDeclaration(
 fn expectNodeFmt(gen: *Generator, expected: []const u8, node: Node) !void
 {
     return switch (node.tag) {
-        .decl => std.testing.expectFmt(expected, "{}", .{gen.fmtDeclNode(node.index)}),
+        .decl, .usingnamespace_statement => std.testing.expectFmt(expected, "{}", .{gen.fmtStatementNode(node)}),
         else => std.testing.expectFmt(expected, "{}", .{gen.fmtExprNode(node)}),
     };
 }
@@ -945,6 +976,11 @@ test "node printing"
     try gen.expectNodeFmt(
         "pub extern \"fbb\" const foo: u32;\n",
         try gen.createDeclaration(null, true, .{ .dyn = "fbb" }, .Const, "foo", u32_type, null),
+    );
+
+    try gen.expectNodeFmt(
+        "usingnamespace @import(\"std\");\n",
+        try gen.createUsingnamespace(try gen.createBuiltinCall("import", &.{ try gen.createStringLiteral("std") })),
     );
 }
 
