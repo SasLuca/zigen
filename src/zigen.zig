@@ -215,13 +215,17 @@ pub fn format(self: Generator, comptime fmt: []const u8, options: std.fmt.Format
 
     for (self.top_level_nodes.keys()) |tln|
     {
-        try writer.print("{}", .{self.fmtNode(tln)});
+        switch (tln.tag)
+        {
+            .decl => try writer.print("{}", .{self.fmtDecl(tln.index)}),
+            else => unreachable,
+        }
     }
 }
 
 fn fmtNode(self: *const Generator, node: Node) std.fmt.Formatter(formatNode)
 {
-    return std.fmt.Formatter(formatNode){
+    return .{
         .data = FormattableNode{
             .gen = self,
             .node = node,
@@ -371,36 +375,7 @@ fn formatNode(
                 try writer.print(".{s}", .{std.zig.fmtId(rhs)});
             }
         },
-        .decl =>
-        {
-            const decl: Decl = self.decls.get(node.index);
-            if (decl.flags.is_pub) try writer.writeAll("pub ");
-            switch (decl.extern_mod) {
-                .none =>
-                {
-                    try writer.writeAll(if (decl.flags.is_const) "const " else "var ");
-                    try writer.print("{s}", .{std.zig.fmtId(decl.name)});
-                    if (decl.type_annotation) |ta| try writer.print(": {}", .{self.fmtNode(ta)});
-                    try writer.print(" = {};\n", .{self.fmtNode(decl.value.?)});
-                },
-                .static =>
-                {
-                    try writer.writeAll("extern ");
-                    try writer.writeAll(if (decl.flags.is_const) "const " else "var ");
-                    try writer.print("{s}", .{std.zig.fmtId(decl.name)});
-                    try writer.print(": {};\n", .{self.fmtNode(decl.type_annotation.?)});
-                    std.debug.assert(decl.value == null);
-                },
-                .dyn => |lib_str|
-                {
-                    try writer.print("extern \"{s}\" ", .{lib_str});
-                    try writer.writeAll(if (decl.flags.is_const) "const " else "var ");
-                    try writer.print("{s}", .{std.zig.fmtId(decl.name)});
-                    try writer.print(": {};\n", .{self.fmtNode(decl.type_annotation.?)});
-                    std.debug.assert(decl.value == null);
-                },
-            }
-        },
+        .decl => unreachable,
         .decl_ref =>
         {
             const slice = self.decls.slice();
@@ -452,6 +427,58 @@ fn formatNode(
                 }
             }
             try writer.print("{s}", .{std.zig.fmtId(names[node.index])});
+        },
+    }
+}
+
+fn fmtDecl(self: *const Generator, decl_index: Node.Index) std.fmt.Formatter(formatDecl)
+{
+    return .{
+        .data = FormattableDecl{
+            .gen = self,
+            .index = decl_index,
+        },
+    };
+}
+
+const FormattableDecl = struct { gen: *const Generator, index: Node.Index };
+fn formatDecl(
+    fmt_decl: FormattableDecl,
+    comptime fmt: []const u8,
+    options: std.fmt.FormatOptions,
+    writer: anytype,
+) @TypeOf(writer).Error!void
+{
+    _ = fmt;
+    _ = options;
+
+    const self = fmt_decl.gen;
+    const decl: Decl = self.decls.get(fmt_decl.index);
+
+    if (decl.flags.is_pub) try writer.writeAll("pub ");
+    switch (decl.extern_mod) {
+        .none =>
+        {
+            try writer.writeAll(if (decl.flags.is_const) "const " else "var ");
+            try writer.print("{s}", .{std.zig.fmtId(decl.name)});
+            if (decl.type_annotation) |ta| try writer.print(": {}", .{self.fmtNode(ta)});
+            try writer.print(" = {};\n", .{self.fmtNode(decl.value.?)});
+        },
+        .static =>
+        {
+            try writer.writeAll("extern ");
+            try writer.writeAll(if (decl.flags.is_const) "const " else "var ");
+            try writer.print("{s}", .{std.zig.fmtId(decl.name)});
+            try writer.print(": {};\n", .{self.fmtNode(decl.type_annotation.?)});
+            std.debug.assert(decl.value == null);
+        },
+        .dyn => |lib_str|
+        {
+            try writer.print("extern \"{s}\" ", .{lib_str});
+            try writer.writeAll(if (decl.flags.is_const) "const " else "var ");
+            try writer.print("{s}", .{std.zig.fmtId(decl.name)});
+            try writer.print(": {};\n", .{self.fmtNode(decl.type_annotation.?)});
+            std.debug.assert(decl.value == null);
         },
     }
 }
@@ -793,35 +820,6 @@ test "node printing"
         .alignment = 16,
         .flags = .{ .is_allowzero = true, .is_const = true, .is_volatile = true },
     }));
-
-    try gen.expectNodeFmt(
-        "const foo = 3;\n",
-        try gen.createDeclaration(null, false, .none, .Const, "foo", null, try gen.createLiteral("3")),
-    );
-    try gen.expectNodeFmt(
-        "pub const foo = 3;\n",
-        try gen.createDeclaration(null, true, .none, .Const, "foo", null, try gen.createLiteral("3")),
-    );
-    try gen.expectNodeFmt(
-        "pub const foo = 3;\n",
-        try gen.createDeclaration(null, true, .none, .Const, "foo", null, try gen.createLiteral("3")),
-    );
-    try gen.expectNodeFmt(
-        "pub const foo: u32 = 3;\n",
-        try gen.createDeclaration(null, true, .none, .Const, "foo", u32_type, try gen.createLiteral("3")),
-    );
-    try gen.expectNodeFmt(
-        "pub var foo: u32 = 3;\n",
-        try gen.createDeclaration(null, true, .none, .Var, "foo", u32_type, try gen.createLiteral("3")),
-    );
-    try gen.expectNodeFmt(
-        "pub extern var foo: u32;\n",
-        try gen.createDeclaration(null, true, .static, .Var, "foo", u32_type, null),
-    );
-    try gen.expectNodeFmt(
-        "pub extern const foo: u32;\n",
-        try gen.createDeclaration(null, true, .static, .Const, "foo", u32_type, null),
-    );
 }
 
 test "top level decls"
