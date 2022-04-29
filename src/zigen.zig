@@ -20,6 +20,20 @@ usingnamespace_statements: NodeSet = .{},
 
 /// referenced by `Generator.builtin_calls` and `Generator.function_calls`.
 contiguous_param_lists: std.ArrayListUnmanaged(Node) = .{},
+/// string set to avoid duplicating the same string multiple times.
+string_set: StringSet = .{},
+
+fn getString(self: *Generator, str: []const u8) std.mem.Allocator.Error![]const u8
+{
+    const gop = try self.string_set.getOrPut(self.allocator(), str);
+    if (!gop.found_existing) {
+        gop.key_ptr.* = self.allocator().dupe(u8, str) catch |err| {
+            _ = self.string_set.pop();
+            return err;
+        };
+    }
+    return gop.key_ptr.*;
+}
 
 const StringSet = std.StringArrayHashMapUnmanaged(void);
 fn ExternStructArraySet(comptime T: type) type {
@@ -620,9 +634,16 @@ pub fn intType(self: *Generator, comptime T: type) error{}!Node
 pub fn createLiteral(self: *Generator, literal_str: []const u8) std.mem.Allocator.Error!Node
 {
     const gop = try self.raw_literals.getOrPut(self.allocator(), literal_str);
+    errdefer {
+        if (!gop.found_existing)
+        {
+            _ = self.string_set.pop();
+        }
+    }
+
     if (!gop.found_existing)
     {
-        gop.key_ptr.* = try self.allocator().dupe(u8, literal_str);
+        gop.key_ptr.* = try self.getString(literal_str);
     }
 
     return Node{
@@ -683,8 +704,7 @@ pub fn createBuiltinCall(self: *Generator, builtin_name: []const u8, params: []c
     const new = try self.builtin_calls.addOne(self.allocator());
     errdefer _ = self.builtin_calls.pop();
 
-    const duped_name = try self.allocator().dupe(u8, builtin_name);
-    errdefer self.allocator().free(duped_name);
+    const duped_name = try self.getString(builtin_name);
 
     const params_start = self.contiguous_param_lists.items.len;
     try self.contiguous_param_lists.appendSlice(self.allocator(), params);
@@ -865,7 +885,7 @@ fn createDeclaration(
     {
         .none, .static => extern_mod,
         .dyn => |str| Decl.ExternMod{
-            .dyn = try self.allocator().dupe(u8, str),
+            .dyn = try self.getString(str),
         },
     };
     errdefer {
@@ -877,8 +897,7 @@ fn createDeclaration(
         self.allocator().free(str);
     }
 
-    const duped_name = try self.allocator().dupe(u8, name);
-    errdefer self.allocator().free(duped_name);
+    const duped_name = try self.getString(name);
 
     self.decls.set(new_index, Decl{
         .parent_index = parent_index,
