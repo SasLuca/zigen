@@ -9,6 +9,7 @@ builtin_calls: std.ArrayListUnmanaged(BuiltinCall) = .{},
 function_calls: std.ArrayListUnmanaged(FunctionCall) = .{},
 optionals: NodeSet = .{},
 addrofs: NodeSet = .{},
+derefs: NodeSet = .{},
 pointers: std.MultiArrayList(Pointer) = .{},
 dot_accesses: std.ArrayListUnmanaged(DotAccess) = .{},
 decls: std.MultiArrayList(Decl) = .{},
@@ -43,6 +44,8 @@ pub const Node = struct
         optional,
         /// index into field `Generator.addrofs`.
         addrof,
+        /// index into field `Generator.derefs`.
+        deref,
         /// index into field `Generator.pointers`.
         pointer,
         /// index into field `Generator.dot_accesses`.
@@ -192,6 +195,7 @@ fn formatNode(
         .signed_int => try writer.print("i{d}", .{@intCast(u16, node.index)}),
         .optional => try writer.print("?{}", .{self.fmtNode(self.optionals.keys()[node.index])}),
         .addrof => try writer.print("&{}", .{self.fmtNode(self.addrofs.keys()[node.index])}),
+        .deref => try writer.print("{}.*", .{self.fmtNode(self.derefs.keys()[node.index])}),
         .dot_access =>
         {
             const dot_access: DotAccess = self.dot_accesses.items[node.index];
@@ -298,6 +302,7 @@ fn formatNode(
                 .optional,
                 .pointer,
                 .dot_access,
+                .deref,
                 => try writer.print("{}", .{self.fmtNode(children[node.index])}),
                 .addrof => unreachable,
             }
@@ -501,6 +506,15 @@ pub fn createAddressOf(self: *Generator, node: Node) std.mem.Allocator.Error!Nod
     };
 }
 
+pub fn createDeref(self: *Generator, node: Node) std.mem.Allocator.Error!Node
+{
+    const gop = try self.derefs.getOrPut(self.allocator(), node);
+    return Node{
+        .index = gop.index,
+        .tag = .deref,
+    };
+}
+
 pub fn createPointerType(
     self: *Generator,
     size: std.builtin.Type.Pointer.Size,
@@ -652,35 +666,40 @@ test "node printing"
     var gen = Generator.init(std.testing.allocator);
     defer gen.deinit();
 
+    const u32_type = try gen.intTypeFrom(u32);
+    const literal_43 = try gen.createLiteral("43");
+    const p_u32_type = try gen.createPointerType(.One, u32_type, .{});
+
+    try gen.expectNodeFmt("u32", u32_type);
+    try gen.expectNodeFmt("43",  literal_43);
+    try gen.expectNodeFmt("&@as(u32, 43)", try gen.createAddressOf(try gen.createBuiltinCall("as", &.{ u32_type, literal_43 })));
+    try gen.expectNodeFmt("@as(*u32, 43).*", try gen.createDeref(try gen.createBuiltinCall("as", &.{ p_u32_type, literal_43 })));
     try gen.expectNodeFmt("@This()", try gen.createBuiltinCall("This", &.{}));
     try gen.expectNodeFmt("type", try gen.primitiveTypeFrom(type));
-    try gen.expectNodeFmt("u32", try gen.intTypeFrom(u32));
-    try gen.expectNodeFmt("@as(u32, 43)",  try gen.createLiteral("@as(u32, 43)"));
-    try gen.expectNodeFmt("&@as(u32, 43)", try gen.createAddressOf(try gen.createLiteral("@as(u32, 43)")));
 
-    try gen.expectNodeFmt("*u32", try gen.createPointerType(.One, try gen.intTypeFrom(u32), .{}));
-    try gen.expectNodeFmt("?*u32", try gen.createOptionalType(try gen.createPointerType(.One, try gen.intTypeFrom(u32), .{})));
+    try gen.expectNodeFmt("*u32", p_u32_type);
+    try gen.expectNodeFmt("?*u32", try gen.createOptionalType(p_u32_type));
 
-    try gen.expectNodeFmt("[*]u32", try gen.createPointerType(.Many, try gen.intTypeFrom(u32), .{}));
-    try gen.expectNodeFmt("[]u32", try gen.createPointerType(.Slice, try gen.intTypeFrom(u32), .{}));
-    try gen.expectNodeFmt("[:0]u32", try gen.createPointerType(.Slice, try gen.intTypeFrom(u32), .{
+    try gen.expectNodeFmt("[*]u32", try gen.createPointerType(.Many, u32_type, .{}));
+    try gen.expectNodeFmt("[]u32", try gen.createPointerType(.Slice, u32_type, .{}));
+    try gen.expectNodeFmt("[:0]u32", try gen.createPointerType(.Slice, u32_type, .{
         .sentinel = try gen.createLiteral("0"),
     }));
-    try gen.expectNodeFmt("[:0]align(16) u32", try gen.createPointerType(.Slice, try gen.intTypeFrom(u32), .{
+    try gen.expectNodeFmt("[:0]align(16) u32", try gen.createPointerType(.Slice, u32_type, .{
         .sentinel = try gen.createLiteral("0"),
         .alignment = 16,
     }));
-    try gen.expectNodeFmt("[:0]allowzero align(16) u32", try gen.createPointerType(.Slice, try gen.intTypeFrom(u32), .{
+    try gen.expectNodeFmt("[:0]allowzero align(16) u32", try gen.createPointerType(.Slice, u32_type, .{
         .sentinel = try gen.createLiteral("0"),
         .alignment = 16,
         .flags = .{ .is_allowzero = true, .is_const = false, .is_volatile = false },
     }));
-    try gen.expectNodeFmt("[:0]allowzero align(16) const u32", try gen.createPointerType(.Slice, try gen.intTypeFrom(u32), .{
+    try gen.expectNodeFmt("[:0]allowzero align(16) const u32", try gen.createPointerType(.Slice, u32_type, .{
         .sentinel = try gen.createLiteral("0"),
         .alignment = 16,
         .flags = .{ .is_allowzero = true, .is_const = true, .is_volatile = false },
     }));
-    try gen.expectNodeFmt("[:0]allowzero align(16) const volatile u32", try gen.createPointerType(.Slice, try gen.intTypeFrom(u32), .{
+    try gen.expectNodeFmt("[:0]allowzero align(16) const volatile u32", try gen.createPointerType(.Slice, u32_type, .{
         .sentinel = try gen.createLiteral("0"),
         .alignment = 16,
         .flags = .{ .is_allowzero = true, .is_const = true, .is_volatile = true },
@@ -700,19 +719,19 @@ test "node printing"
     );
     try gen.expectNodeFmt(
         "pub const foo: u32 = 3;\n",
-        try gen.createDeclaration(null, true, .none, .Const, "foo", try gen.intTypeFrom(u32), try gen.createLiteral("3")),
+        try gen.createDeclaration(null, true, .none, .Const, "foo", u32_type, try gen.createLiteral("3")),
     );
     try gen.expectNodeFmt(
         "pub var foo: u32 = 3;\n",
-        try gen.createDeclaration(null, true, .none, .Var, "foo", try gen.intTypeFrom(u32), try gen.createLiteral("3")),
+        try gen.createDeclaration(null, true, .none, .Var, "foo", u32_type, try gen.createLiteral("3")),
     );
     try gen.expectNodeFmt(
         "pub extern var foo: u32;\n",
-        try gen.createDeclaration(null, true, .static, .Var, "foo", try gen.intTypeFrom(u32), null),
+        try gen.createDeclaration(null, true, .static, .Var, "foo", u32_type, null),
     );
     try gen.expectNodeFmt(
         "pub extern const foo: u32;\n",
-        try gen.createDeclaration(null, true, .static, .Const, "foo", try gen.intTypeFrom(u32), null),
+        try gen.createDeclaration(null, true, .static, .Const, "foo", u32_type, null),
     );
 }
 
