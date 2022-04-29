@@ -4,7 +4,7 @@ const Generator = @This();
 arena: std.heap.ArenaAllocator,
 top_level_nodes: NodeSet = .{},
 
-raw_literals: std.StringArrayHashMapUnmanaged(void) = .{},
+raw_literals: StringSet = .{},
 builtin_calls: std.ArrayListUnmanaged(BuiltinCall) = .{},
 function_calls: std.ArrayListUnmanaged(FunctionCall) = .{},
 optionals: NodeSet = .{},
@@ -13,6 +13,9 @@ pointers: std.MultiArrayList(Pointer) = .{},
 dot_accesses: std.ArrayListUnmanaged(DotAccess) = .{},
 decls: std.MultiArrayList(Decl) = .{},
 
+contiguous_param_lists: std.ArrayListUnmanaged(Node) = .{},
+
+const StringSet = std.StringArrayHashMapUnmanaged(void);
 const NodeSet = std.AutoArrayHashMapUnmanaged(Node, void);
 
 pub const Node = struct
@@ -77,13 +80,15 @@ pub const PrimitiveType = enum
 pub const BuiltinCall = struct
 {
     name: []const u8,
-    params: []const Node,
+    params_start: usize,
+    params_end: usize,
 };
 
 pub const FunctionCall = struct
 {
     callable: Node,
-    params: []const Node,
+    params_start: usize,
+    params_end: usize,
 };
 
 pub const Pointer = struct
@@ -199,28 +204,32 @@ fn formatNode(
         .builtin_call =>
         {
             const builtin_call: BuiltinCall = self.builtin_calls.items[node.index];
+            const params: []const Node = self.contiguous_param_lists.items[builtin_call.params_start..builtin_call.params_end];
+
             try writer.print("@{s}(", .{builtin_call.name});
-            for (builtin_call.params[0..builtin_call.params.len - @boolToInt(builtin_call.params.len != 0)]) |param|
+            for (params[0..params.len - @boolToInt(params.len != 0)]) |param|
             {
                 try writer.print("{}, ", .{self.fmtNode(param)});
             }
-            if (builtin_call.params.len != 0)
+            if (params.len != 0)
             {
-                try writer.print("{}", .{self.fmtNode(builtin_call.params[builtin_call.params.len - 1])});
+                try writer.print("{}", .{self.fmtNode(params[params.len - 1])});
             }
             try writer.writeByte(')');
         },
         .function_call =>
         {
             const function_call: FunctionCall = self.function_calls.items[node.index];
+            const params: []const Node = self.contiguous_param_lists.items[function_call.params_start..function_call.params_end];
+
             try writer.print("{}(", .{self.fmtNode(function_call.callable)});
-            for (function_call.params[0..function_call.params.len - @boolToInt(function_call.params.len != 0)]) |param|
+            for (params[0..params.len - @boolToInt(params.len != 0)]) |param|
             {
                 try writer.print("{}, ", .{self.fmtNode(param)});
             }
-            if (function_call.params.len != 0)
+            if (params.len != 0)
             {
-                try writer.print("{}", .{self.fmtNode(function_call.params[function_call.params.len - 1])});
+                try writer.print("{}", .{self.fmtNode(params[params.len - 1])});
             }
             try writer.writeByte(')');
         },
@@ -436,12 +445,14 @@ pub fn createBuiltinCall(self: *Generator, builtin_name: []const u8, params: []c
     const duped_name = try self.allocator().dupe(u8, builtin_name);
     errdefer self.allocator().free(duped_name);
 
-    const duped_params = try self.allocator().dupe(Node, params);
-    errdefer self.allocator().free(duped_params);
+    const params_start = self.contiguous_param_lists.items.len;
+    try self.contiguous_param_lists.appendSlice(self.allocator(), params);
+    const params_end = self.contiguous_param_lists.items.len;
 
     new.* = .{
         .name = duped_name,
-        .params = duped_params,
+        .params_start = params_start,
+        .params_end = params_end,
     };
 
     return Node{
@@ -456,12 +467,14 @@ pub fn createFunctionCall(self: *Generator, callable: Node, params: []const Node
     const new = try self.function_calls.addOne(self.allocator());
     errdefer _ = self.function_calls.pop();
 
-    const duped_params = try self.allocator().dupe(Node, params);
-    errdefer self.allocator().free(duped_params);
+    const params_start = self.contiguous_param_lists.items.len;
+    try self.contiguous_param_lists.appendSlice(self.allocator(), params);
+    const params_end = self.contiguous_param_lists.items.len;
 
     new.* = .{
         .callable = callable,
-        .params = duped_params,
+        .params_start = params_start,
+        .params_end = params_end,
     };
 
     return Node{
