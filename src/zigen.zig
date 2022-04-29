@@ -5,12 +5,14 @@ arena: std.heap.ArenaAllocator,
 top_level_nodes: NodeSet = .{},
 
 raw_literals: StringSet = .{},
+bin_ops: std.ArrayListUnmanaged(BinOp) = .{},
 builtin_calls: std.ArrayListUnmanaged(BuiltinCall) = .{},
 function_calls: std.ArrayListUnmanaged(FunctionCall) = .{},
 optionals: NodeSet = .{},
 addrofs: NodeSet = .{},
 derefs: NodeSet = .{},
 pointers: std.MultiArrayList(Pointer) = .{},
+parentheses_expressions: NodeSet = .{},
 dot_accesses: std.ArrayListUnmanaged(DotAccess) = .{},
 decls: std.MultiArrayList(Decl) = .{},
 
@@ -19,23 +21,25 @@ contiguous_param_lists: std.ArrayListUnmanaged(Node) = .{},
 const StringSet = std.StringArrayHashMapUnmanaged(void);
 const NodeSet = std.AutoArrayHashMapUnmanaged(Node, void);
 
-pub const Node = struct
+const Node = struct
 {
     /// refers to the index of the value referred to by the declaration. Which array it indexes into is dependent on `Node.tag`.
     index: Node.Index,
     tag: Node.Tag,
 
-    pub const Index = usize;
-    pub const Tag = enum(usize)
+    const Index = usize;
+    const Tag = enum(usize)
     {
-        /// index into field `Generator.raw_literals`.
-        raw_literal,
         /// index is the tag value of a `Generator.PrimitiveType`.
         primitive_type,
         /// index is the number of bits of the unsigned integer.
         unsigned_int,
         /// index is the number of bits of the signed integer.
         signed_int,
+        /// index into field `Generator.raw_literals`.
+        raw_literal,
+        /// index into field `Generator.bin_ops`.
+        bin_op,
         /// index into field `Generator.builtin_calls`.
         builtin_call,
         /// index into field `Generator.function_calls`.
@@ -48,6 +52,8 @@ pub const Node = struct
         deref,
         /// index into field `Generator.pointers`.
         pointer,
+        /// index into field `Generator.parentheses_expressions`.
+        parentheses_expression,
         /// index into field `Generator.dot_accesses`.
         dot_access,
         /// index into field `Generator.decls`.
@@ -57,7 +63,7 @@ pub const Node = struct
     };
 };
 
-pub const PrimitiveType = enum
+const PrimitiveType = enum
 {
     @"isize",
     @"usize",
@@ -80,21 +86,70 @@ pub const PrimitiveType = enum
     @"comptime_float",
 };
 
-pub const BuiltinCall = struct
+const BinOp = struct
+{
+    lhs: Node,
+    tag: BinOp.Tag,
+    rhs: Node,
+
+    const Tag = enum
+    {
+        @"+",
+        @"+%",
+        @"+|",
+
+        @"-",
+        @"-%",
+        @"-|",
+
+        @"*",
+        @"*%",
+        @"*|",
+
+        @"/",
+        @"%",
+
+        @"<<",
+        @"<<|",
+        @">>",
+        @"&",
+        @"|",
+        @"^",
+
+        @"orelse",
+        @"catch",
+
+        @"and",
+        @"or",
+
+        @"==",
+        @"!=",
+        @">",
+        @">=",
+        @"<",
+        @"<=",
+
+        @"++",
+        @"**",
+        @"||",
+    };
+};
+
+const BuiltinCall = struct
 {
     name: []const u8,
     params_start: usize,
     params_end: usize,
 };
 
-pub const FunctionCall = struct
+const FunctionCall = struct
 {
     callable: Node,
     params_start: usize,
     params_end: usize,
 };
 
-pub const Pointer = struct
+const Pointer = struct
 {
     size: std.builtin.Type.Pointer.Size,
     alignment: ?u29,
@@ -102,20 +157,20 @@ pub const Pointer = struct
     sentinel: ?Node,
     flags: Flags,
 
-    pub const Flags = packed struct {
+    const Flags = packed struct {
         is_const: bool,
         is_volatile: bool,
         is_allowzero: bool,
     };
 };
 
-pub const DotAccess = struct
+const DotAccess = struct
 {
     lhs: Node,
     rhs: []const []const u8,
 };
 
-pub const Decl = struct
+const Decl = struct
 {
     /// refers to the index of the parent container declaration, with 'null' meaning file scope.
     parent_index: ?Node.Index,
@@ -125,14 +180,14 @@ pub const Decl = struct
     type_annotation: ?Node,
     value: ?Node,
 
-    pub const ExternMod = union(enum)
+    const ExternMod = union(enum)
     {
         none,
         static,
         dyn: []const u8,
     };
 
-    pub const Flags = extern struct
+    const Flags = extern struct
     {
         is_pub: bool,
         is_const: bool,
@@ -189,22 +244,15 @@ fn formatNode(
     const node = fmt_node.node;
     switch (node.tag)
     {
-        .raw_literal => try writer.writeAll(self.raw_literals.keys()[node.index]),
         .primitive_type => try writer.writeAll(@tagName(@intToEnum(PrimitiveType, node.index))),
         .unsigned_int => try writer.print("u{d}", .{@intCast(u16, node.index)}),
         .signed_int => try writer.print("i{d}", .{@intCast(u16, node.index)}),
-        .optional => try writer.print("?{}", .{self.fmtNode(self.optionals.keys()[node.index])}),
-        .addrof => try writer.print("&{}", .{self.fmtNode(self.addrofs.keys()[node.index])}),
-        .deref => try writer.print("{}.*", .{self.fmtNode(self.derefs.keys()[node.index])}),
-        .dot_access =>
-        {
-            const dot_access: DotAccess = self.dot_accesses.items[node.index];
-            try writer.print("{}", .{self.fmtNode(dot_access.lhs)});
-            for (dot_access.rhs) |rhs|
-            {
-                try writer.print(".{s}", .{std.zig.fmtId(rhs)});
-            }
-        },
+        .raw_literal => try writer.writeAll(self.raw_literals.keys()[node.index]),
+        .bin_op => try writer.print("{} {s} {}", .{
+            self.fmtNode(self.bin_ops.items[node.index].lhs),
+            @tagName(self.bin_ops.items[node.index].tag),
+            self.fmtNode(self.bin_ops.items[node.index].rhs),
+        }),
         .builtin_call =>
         {
             const builtin_call: BuiltinCall = self.builtin_calls.items[node.index];
@@ -237,6 +285,9 @@ fn formatNode(
             }
             try writer.writeByte(')');
         },
+        .optional => try writer.print("?{}", .{self.fmtNode(self.optionals.keys()[node.index])}),
+        .addrof => try writer.print("&{}", .{self.fmtNode(self.addrofs.keys()[node.index])}),
+        .deref => try writer.print("{}.*", .{self.fmtNode(self.derefs.keys()[node.index])}),
         .pointer =>
         {
             const slice = self.pointers.slice();
@@ -297,14 +348,27 @@ fn formatNode(
                 .raw_literal,
                 .builtin_call,
                 .function_call,
-                .decl,
                 .decl_ref,
                 .optional,
                 .pointer,
+                .parentheses_expression,
                 .dot_access,
                 .deref,
+                .bin_op,
                 => try writer.print("{}", .{self.fmtNode(children[node.index])}),
-                .addrof => unreachable,
+                .addrof,
+                .decl,
+                => unreachable,
+            }
+        },
+        .parentheses_expression => try writer.print("({})", .{self.fmtNode(self.parentheses_expressions.keys()[node.index])}),
+        .dot_access =>
+        {
+            const dot_access: DotAccess = self.dot_accesses.items[node.index];
+            try writer.print("{}", .{self.fmtNode(dot_access.lhs)});
+            for (dot_access.rhs) |rhs|
+            {
+                try writer.print(".{s}", .{std.zig.fmtId(rhs)});
             }
         },
         .decl =>
@@ -441,6 +505,24 @@ pub fn createLiteral(self: *Generator, literal_str: []const u8) std.mem.Allocato
     };
 }
 
+pub fn createBinOp(self: *Generator, lhs: Node, op: BinOp.Tag, rhs: Node) std.mem.Allocator.Error!Node
+{
+    const new_index = self.bin_ops.items.len;
+    const new = try self.bin_ops.addOne(self.allocator());
+    errdefer _ = self.bin_ops.pop();
+
+    new.* = .{
+        .lhs = lhs,
+        .tag = op,
+        .rhs = rhs,
+    };
+
+    return Node{
+        .index = new_index,
+        .tag = .bin_op,
+    };
+}
+
 pub fn createBuiltinCall(self: *Generator, builtin_name: []const u8, params: []const Node) std.mem.Allocator.Error!Node
 {
     const new_index = self.builtin_calls.items.len;
@@ -545,11 +627,16 @@ pub fn createPointerType(
     };
 }
 
-pub fn createDotAccess(
-    self: *Generator,
-    lhs: Node,
-    rhs: []const []const u8,
-) std.mem.Allocator.Error!Node
+pub fn createParenthesesExpression(self: *Generator, node: Node) std.mem.Allocator.Error!Node
+{
+    const gop = try self.parentheses_expressions.getOrPut(self.allocator(), node);
+    return Node{
+        .index = gop.index,
+        .tag = .parentheses_expression,
+    };
+}
+
+pub fn createDotAccess(self: *Generator, lhs: Node, rhs: []const []const u8) std.mem.Allocator.Error!Node
 {
     const new_index = self.dot_accesses.items.len;
     const new_dot_access = try self.dot_accesses.addOne(self.allocator());
@@ -676,6 +763,8 @@ test "node printing"
     try gen.expectNodeFmt("@as(*u32, 43).*", try gen.createDeref(try gen.createBuiltinCall("as", &.{ p_u32_type, literal_43 })));
     try gen.expectNodeFmt("@This()", try gen.createBuiltinCall("This", &.{}));
     try gen.expectNodeFmt("type", try gen.primitiveTypeFrom(type));
+    try gen.expectNodeFmt("(43)", try gen.createParenthesesExpression(literal_43));
+    try gen.expectNodeFmt("(43 + 43)", try gen.createParenthesesExpression(try gen.createBinOp(literal_43, .@"+", literal_43)));
 
     try gen.expectNodeFmt("*u32", p_u32_type);
     try gen.expectNodeFmt("?*u32", try gen.createOptionalType(p_u32_type));
@@ -741,20 +830,22 @@ test "top level decls"
     defer gen.deinit();
 
     const std_import = try gen.addDecl(false, .Const, "std", null, try gen.createBuiltinCall("import", &.{ try gen.createLiteral("\"std\"") }));
-    const array_list_ref_decl = try gen.addDecl(false, .Const, "ArrayList", null, try gen.createDotAccess(std_import, &.{ "ArrayList" }));
-    _ = try gen.addDecl(true, .Const, "String", null, try gen.createFunctionCall(array_list_ref_decl, &.{ try gen.intTypeFrom(u8) }));
+    const array_list_ref_decl = try gen.addDecl(false, .Const, "ArrayListUnmanaged", null, try gen.createDotAccess(std_import, &.{ "ArrayListUnmanaged" }));
+    const string_type_decl = try gen.addDecl(true, .Const, "String", null, try gen.createFunctionCall(array_list_ref_decl, &.{ try gen.intTypeFrom(u8) }));
 
     const foo_decl = try gen.addDecl(false, .Const, "foo", null, try gen.createLiteral("3"));
     const bar_decl = try gen.addDecl(false, .Var, "bar", try gen.intTypeFrom(u32), foo_decl);
     _ = try gen.addDecl(true, .Const, "p_bar", try gen.createPointerType(.One, try gen.intTypeFrom(u32), .{}), try gen.createAddressOf(bar_decl));
+    _ = try gen.addDecl(true, .Const, "empty_str", string_type_decl, try gen.createLiteral(".{}"));
 
     try std.testing.expectFmt(
         \\const std = @import("std");
-        \\const ArrayList = std.ArrayList;
-        \\pub const String = ArrayList(u8);
+        \\const ArrayListUnmanaged = std.ArrayListUnmanaged;
+        \\pub const String = ArrayListUnmanaged(u8);
         \\const foo = 3;
         \\var bar: u32 = foo;
         \\pub const p_bar: *u32 = &bar;
+        \\pub const empty_str: String = .{};
         \\
     , "{}", .{gen});
 }
