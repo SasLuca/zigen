@@ -17,6 +17,7 @@ parentheses_expressions: NodeSet = .{},
 dot_accesses: std.ArrayListUnmanaged(DotAccess) = .{},
 decls: std.MultiArrayList(Decl) = .{},
 
+/// referenced by `Generator.builtin_calls` and `Generator.function_calls`.
 contiguous_param_lists: std.ArrayListUnmanaged(Node) = .{},
 
 const StringSet = std.StringArrayHashMapUnmanaged(void);
@@ -54,6 +55,8 @@ const Node = extern struct
         unsigned_int,
         /// index is the number of bits of the signed integer.
         signed_int,
+        /// index is the tag value of a `Generator.PrimitiveValue`.
+        primitive_value,
         /// index into field `Generator.raw_literals`.
         raw_literal,
         /// index into field `Generator.prefix_ops`.
@@ -102,6 +105,14 @@ const PrimitiveType = enum(u8)
     @"anyerror",
     @"comptime_int",
     @"comptime_float",
+};
+
+const PrimitiveValue = enum(u8)
+{
+    @"true",
+    @"false",
+    @"null",
+    @"undefined",
 };
 
 const PrefixOp = extern struct
@@ -292,6 +303,7 @@ fn formatExprNode(
         .primitive_type => try writer.writeAll(@tagName(@intToEnum(PrimitiveType, node.index))),
         .unsigned_int => try writer.print("u{d}", .{@intCast(u16, node.index)}),
         .signed_int => try writer.print("i{d}", .{@intCast(u16, node.index)}),
+        .primitive_value => try writer.writeAll(@tagName(@intToEnum(PrimitiveValue, node.index))),
         .raw_literal => try writer.writeAll(self.raw_literals.keys()[node.index]),
         .prefix_op => try writer.print("{s}{}", .{
             @tagName(self.prefix_ops.keys()[node.index].tag),
@@ -402,14 +414,14 @@ fn formatExprNode(
                 .builtin_call,
                 .function_call,
                 .optional,
-                .pointer,
                 .parentheses_expression,
                 .dot_access,
                 .decl_ref,
+                .pointer,
                 => try writer.print("{}", .{self.fmtExprNode(children[node.index])}),
-                .prefix_op,
-                .decl,
-                => unreachable,
+                .primitive_value => unreachable,
+                .prefix_op => unreachable,
+                .decl => unreachable,
             }
         },
         .parentheses_expression => try writer.print("({})", .{self.fmtExprNode(self.parentheses_expressions.keys()[node.index])}),
@@ -546,6 +558,27 @@ pub fn primitiveType(self: *Generator, tag: PrimitiveType) error{}!Node
 pub fn primitiveTypeFrom(self: *Generator, comptime T: type) error{}!Node
 {
     return self.primitiveType(@field(PrimitiveType, @typeName(T)));
+}
+
+pub fn primitiveValue(self: *Generator, tag: PrimitiveValue) error{}!Node
+{
+    _ = self;
+    return Node{
+        .index = @enumToInt(tag),
+        .tag = .primitive_value,
+    };
+}
+pub fn primitiveValueFrom(self: *Generator, value: anytype) error{}!Node
+{
+    return switch (@TypeOf(value))
+    {
+        bool => self.primitiveValue(switch (value) {
+            true => .@"true",
+            false => .@"false",
+        }),
+        @TypeOf(null) => self.primitiveValue(.@"null"),
+        @TypeOf(undefined) => self.primitiveValue(.@"undefined"),
+    };
 }
 
 pub fn intType(self: *Generator, sign: std.builtin.Signedness, bits: u16) error{}!Node
@@ -842,7 +875,7 @@ test "node printing"
 
     try gen.expectNodeFmt("u32", u32_type);
     try gen.expectNodeFmt("43",  literal_43);
-    try gen.expectNodeFmt("@as(*u32, undefined).*", try gen.createPostfixOp(try gen.createBuiltinCall("as", &.{ p_u32_type, try gen.createLiteral("undefined") }), .@".*"));
+    try gen.expectNodeFmt("@as(*u32, undefined).*", try gen.createPostfixOp(try gen.createBuiltinCall("as", &.{ p_u32_type, try gen.primitiveValue(.@"undefined") }), .@".*"));
     try gen.expectNodeFmt("@This()", try gen.createBuiltinCall("This", &.{}));
     try gen.expectNodeFmt("type", try gen.primitiveTypeFrom(type));
     try gen.expectNodeFmt("(43)", try gen.createParenthesesExpression(literal_43));
@@ -850,6 +883,7 @@ test "node printing"
 
     try gen.expectNodeFmt("*u32", p_u32_type);
     try gen.expectNodeFmt("?*u32", try gen.createOptionalType(p_u32_type));
+    try gen.expectNodeFmt("**u32", try gen.createPointerType(.One, p_u32_type, .{}));
 
     try gen.expectNodeFmt("[*]u32", try gen.createPointerType(.Many, u32_type, .{}));
     try gen.expectNodeFmt("[]u32", try gen.createPointerType(.Slice, u32_type, .{}));
