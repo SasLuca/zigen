@@ -825,7 +825,10 @@ fn createDeclaration(
 
 fn expectNodeFmt(gen: *Generator, expected: []const u8, node: Node) !void
 {
-    return std.testing.expectFmt(expected, "{}", .{gen.fmtExprNode(node)});
+    return switch (node.tag) {
+        .decl => std.testing.expectFmt(expected, "{}", .{gen.fmtDeclNode(node.index)}),
+        else => std.testing.expectFmt(expected, "{}", .{gen.fmtExprNode(node)}),
+    };
 }
 
 test "node printing"
@@ -872,6 +875,35 @@ test "node printing"
         .alignment = 16,
         .flags = .{ .is_allowzero = true, .is_const = true, .is_volatile = true },
     }));
+
+    try gen.expectNodeFmt(
+        "const foo = 3;\n",
+        try gen.createDeclaration(null, false, .none, .Const, "foo", null, try gen.createLiteral("3")),
+    );
+    try gen.expectNodeFmt(
+        "pub const foo = 3;\n",
+        try gen.createDeclaration(null, true, .none, .Const, "foo", null, try gen.createLiteral("3")),
+    );
+    try gen.expectNodeFmt(
+        "pub const foo = 3;\n",
+        try gen.createDeclaration(null, true, .none, .Const, "foo", null, try gen.createLiteral("3")),
+    );
+    try gen.expectNodeFmt(
+        "pub const foo: u32 = 3;\n",
+        try gen.createDeclaration(null, true, .none, .Const, "foo", u32_type, try gen.createLiteral("3")),
+    );
+    try gen.expectNodeFmt(
+        "pub var foo: u32 = 3;\n",
+        try gen.createDeclaration(null, true, .none, .Var, "foo", u32_type, try gen.createLiteral("3")),
+    );
+    try gen.expectNodeFmt(
+        "pub extern var foo: u32;\n",
+        try gen.createDeclaration(null, true, .static, .Var, "foo", u32_type, null),
+    );
+    try gen.expectNodeFmt(
+        "pub extern \"fbb\" const foo: u32;\n",
+        try gen.createDeclaration(null, true, .{ .dyn = "fbb" }, .Const, "foo", u32_type, null),
+    );
 }
 
 test "top level decls"
