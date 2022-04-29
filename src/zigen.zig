@@ -7,6 +7,7 @@ top_level_nodes: NodeSet = .{},
 raw_literals: StringSet = .{},
 prefix_ops: PrefixOpSet = .{},
 bin_ops: std.ArrayListUnmanaged(BinOp) = .{},
+postfix_ops: PostfixOpSet = .{},
 builtin_calls: std.ArrayListUnmanaged(BuiltinCall) = .{},
 function_calls: std.ArrayListUnmanaged(FunctionCall) = .{},
 optionals: NodeSet = .{},
@@ -19,40 +20,24 @@ decls: std.MultiArrayList(Decl) = .{},
 contiguous_param_lists: std.ArrayListUnmanaged(Node) = .{},
 
 const StringSet = std.StringArrayHashMapUnmanaged(void);
-const PrefixOpSet = std.ArrayHashMapUnmanaged(
-    PrefixOp,
-    void,
-    struct
+fn ExternStructArraySet(comptime T: type) type {
+    const Context = struct
     {
-        pub fn hash(self: @This(), prefix_op: PrefixOp) u32 {
+        pub fn hash(self: @This(), prefix_op: T) u32 {
             _ = self;
             return @truncate(u32, std.hash.Wyhash.hash(0, std.mem.asBytes(&prefix_op)));
         }
-        pub fn eql(self: @This(), a: PrefixOp, b: PrefixOp, b_index: usize) bool {
+        pub fn eql(self: @This(), a: T, b: T, b_index: usize) bool {
             _ = self;
             _ = b_index;
             return std.meta.eql(a, b);
         }
-    },
-    true,
-);
-const NodeSet = std.ArrayHashMapUnmanaged(
-    Node,
-    void,
-    struct
-    {
-        pub fn hash(self: @This(), node: Node) u32 {
-            _ = self;
-            return @truncate(u32, std.hash.Wyhash.hash(0, std.mem.asBytes(&node)));
-        }
-        pub fn eql(self: @This(), a: Node, b: Node, b_index: usize) bool {
-            _ = self;
-            _ = b_index;
-            return std.meta.eql(a, b);
-        }
-    },
-    true,
-);
+    };
+    return std.ArrayHashMapUnmanaged(T, void, Context, false);
+}
+const PrefixOpSet = ExternStructArraySet(PrefixOp);
+const PostfixOpSet = ExternStructArraySet(PostfixOp);
+const NodeSet = ExternStructArraySet(Node);
 
 const Node = extern struct
 {
@@ -75,14 +60,14 @@ const Node = extern struct
         prefix_op,
         /// index into field `Generator.bin_ops`.
         bin_op,
+        /// index into field `Generator.postfix_ops`.
+        postfix_op,
         /// index into field `Generator.builtin_calls`.
         builtin_call,
         /// index into field `Generator.function_calls`.
         function_call,
         /// index into field `Generator.optionals`.
         optional,
-        /// index into field `Generator.derefs`.
-        deref,
         /// index into field `Generator.pointers`.
         pointer,
         /// index into field `Generator.parentheses_expressions`.
@@ -133,7 +118,6 @@ const PrefixOp = extern struct
         @"&",
     };
 };
-
 const BinOp = extern struct
 {
     lhs: Node,
@@ -182,6 +166,14 @@ const BinOp = extern struct
         @"||",
     };
 };
+const PostfixOp = extern struct
+{
+    tag: PostfixOp.Tag,
+    target: Node,
+
+    const Tag = enum(u8) { @".?", @".*" };
+};
+
 
 const BuiltinCall = struct
 {
@@ -310,6 +302,10 @@ fn formatExprNode(
             @tagName(self.bin_ops.items[node.index].tag),
             self.fmtExprNode(self.bin_ops.items[node.index].rhs),
         }),
+        .postfix_op => try writer.print("{}{s}", .{
+            self.fmtExprNode(self.postfix_ops.keys()[node.index].target),
+            @tagName(self.postfix_ops.keys()[node.index].tag),
+        }),
         .builtin_call =>
         {
             const builtin_call: BuiltinCall = self.builtin_calls.items[node.index];
@@ -343,7 +339,6 @@ fn formatExprNode(
             try writer.writeByte(')');
         },
         .optional => try writer.print("?{}", .{self.fmtExprNode(self.optionals.keys()[node.index])}),
-        .deref => try writer.print("{}.*", .{self.fmtExprNode(self.derefs.keys()[node.index])}),
         .pointer =>
         {
             const slice = self.pointers.slice();
@@ -403,10 +398,10 @@ fn formatExprNode(
                 .signed_int,
                 .raw_literal,
                 .bin_op,
+                .postfix_op,
                 .builtin_call,
                 .function_call,
                 .optional,
-                .deref,
                 .pointer,
                 .parentheses_expression,
                 .dot_access,
@@ -614,6 +609,18 @@ pub fn createBinOp(self: *Generator, lhs: Node, op: BinOp.Tag, rhs: Node) std.me
     };
 }
 
+pub fn createPostfixOp(self: *Generator, target: Node, op: PostfixOp.Tag) std.mem.Allocator.Error!Node
+{
+    const gop = try self.postfix_ops.getOrPut(self.allocator(), PostfixOp{
+        .tag = op,
+        .target = target,
+    });
+    return Node{
+        .index = gop.index,
+        .tag = .postfix_op,
+    };
+}
+
 pub fn createBuiltinCall(self: *Generator, builtin_name: []const u8, params: []const Node) std.mem.Allocator.Error!Node
 {
     const new_index = self.builtin_calls.items.len;
@@ -667,15 +674,6 @@ pub fn createOptionalType(self: *Generator, node: Node) std.mem.Allocator.Error!
     return Node{
         .index = gop.index,
         .tag = .optional,
-    };
-}
-
-pub fn createDeref(self: *Generator, node: Node) std.mem.Allocator.Error!Node
-{
-    const gop = try self.derefs.getOrPut(self.allocator(), node);
-    return Node{
-        .index = gop.index,
-        .tag = .deref,
     };
 }
 
@@ -841,7 +839,7 @@ test "node printing"
 
     try gen.expectNodeFmt("u32", u32_type);
     try gen.expectNodeFmt("43",  literal_43);
-    try gen.expectNodeFmt("@as(*u32, undefined).*", try gen.createDeref(try gen.createBuiltinCall("as", &.{ p_u32_type, try gen.createLiteral("undefined") })));
+    try gen.expectNodeFmt("@as(*u32, undefined).*", try gen.createPostfixOp(try gen.createBuiltinCall("as", &.{ p_u32_type, try gen.createLiteral("undefined") }), .@".*"));
     try gen.expectNodeFmt("@This()", try gen.createBuiltinCall("This", &.{}));
     try gen.expectNodeFmt("type", try gen.primitiveTypeFrom(type));
     try gen.expectNodeFmt("(43)", try gen.createParenthesesExpression(literal_43));
