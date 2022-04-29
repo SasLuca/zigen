@@ -555,12 +555,12 @@ pub fn primitiveType(self: *Generator, tag: PrimitiveType) error{}!Node
         .tag = .primitive_type,
     };
 }
-pub fn primitiveTypeFrom(self: *Generator, comptime T: type) error{}!Node
+pub fn primType(self: *Generator, comptime T: type) error{}!Node
 {
     return self.primitiveType(@field(PrimitiveType, @typeName(T)));
 }
 
-pub fn primitiveValue(self: *Generator, tag: PrimitiveValue) error{}!Node
+pub fn createPrimitiveValue(self: *Generator, tag: PrimitiveValue) error{}!Node
 {
     _ = self;
     return Node{
@@ -568,20 +568,24 @@ pub fn primitiveValue(self: *Generator, tag: PrimitiveValue) error{}!Node
         .tag = .primitive_value,
     };
 }
-pub fn primitiveValueFrom(self: *Generator, value: anytype) error{}!Node
+pub fn trueVale(self: *Generator) error{}!Node
 {
-    return switch (@TypeOf(value))
-    {
-        bool => self.primitiveValue(switch (value) {
-            true => .@"true",
-            false => .@"false",
-        }),
-        @TypeOf(null) => self.primitiveValue(.@"null"),
-        @TypeOf(undefined) => self.primitiveValue(.@"undefined"),
-    };
+    return self.createPrimitiveValue(.@"true");
+}
+pub fn falseVale(self: *Generator) error{}!Node
+{
+    return self.createPrimitiveValue(.@"false");
+}
+pub fn nullValue(self: *Generator) error{}!Node
+{
+    return self.createPrimitiveValue(.@"null");
+}
+pub fn undefinedValue(self: *Generator) error{}!Node
+{
+    return self.createPrimitiveValue(.@"undefined");
 }
 
-pub fn intType(self: *Generator, sign: std.builtin.Signedness, bits: u16) error{}!Node
+pub fn createIntType(self: *Generator, sign: std.builtin.Signedness, bits: u16) error{}!Node
 {
     _ = self;
     return Node{
@@ -592,10 +596,10 @@ pub fn intType(self: *Generator, sign: std.builtin.Signedness, bits: u16) error{
         },
     };
 }
-pub fn intTypeFrom(self: *Generator, comptime T: type) error{}!Node
+pub fn intType(self: *Generator, comptime T: type) error{}!Node
 {
     const info: std.builtin.Type.Int = @typeInfo(T).Int;
-    return self.intType(info.signedness, info.bits);
+    return self.createIntType(info.signedness, info.bits);
 }
 
 pub fn createLiteral(self: *Generator, literal_str: []const u8) std.mem.Allocator.Error!Node
@@ -610,6 +614,10 @@ pub fn createLiteral(self: *Generator, literal_str: []const u8) std.mem.Allocato
         .index = gop.index,
         .tag = .raw_literal,
     };
+}
+pub fn createStringLiteral(self: *Generator, content: []const u8) std.mem.Allocator.Error!Node
+{
+    return self.createLiteral(try std.fmt.allocPrint(self.allocator(), "\"{s}\"", .{content}));
 }
 
 pub fn createPrefixOp(self: *Generator, op: PrefixOp.Tag, target: Node) std.mem.Allocator.Error!Node
@@ -869,15 +877,15 @@ test "node printing"
     var gen = Generator.init(std.testing.allocator);
     defer gen.deinit();
 
-    const u32_type = try gen.intTypeFrom(u32);
+    const u32_type = try gen.intType(u32);
     const literal_43 = try gen.createLiteral("43");
     const p_u32_type = try gen.createPointerType(.One, u32_type, .{});
 
     try gen.expectNodeFmt("u32", u32_type);
     try gen.expectNodeFmt("43",  literal_43);
-    try gen.expectNodeFmt("@as(*u32, undefined).*", try gen.createPostfixOp(try gen.createBuiltinCall("as", &.{ p_u32_type, try gen.primitiveValue(.@"undefined") }), .@".*"));
+    try gen.expectNodeFmt("@as(*u32, undefined).*", try gen.createPostfixOp(try gen.createBuiltinCall("as", &.{ p_u32_type, try gen.undefinedValue() }), .@".*"));
     try gen.expectNodeFmt("@This()", try gen.createBuiltinCall("This", &.{}));
-    try gen.expectNodeFmt("type", try gen.primitiveTypeFrom(type));
+    try gen.expectNodeFmt("type", try gen.primType(type));
     try gen.expectNodeFmt("(43)", try gen.createParenthesesExpression(literal_43));
     try gen.expectNodeFmt("(43 + 43)", try gen.createParenthesesExpression(try gen.createBinOp(literal_43, .@"+", literal_43)));
 
@@ -945,13 +953,13 @@ test "top level decls"
     var gen = Generator.init(std.testing.allocator);
     defer gen.deinit();
 
-    const std_import = try gen.addDecl(false, .Const, "std", null, try gen.createBuiltinCall("import", &.{ try gen.createLiteral("\"std\"") }));
+    const std_import = try gen.addDecl(false, .Const, "std", null, try gen.createBuiltinCall("import", &.{ try gen.createStringLiteral("std") }));
     const array_list_ref_decl = try gen.addDecl(false, .Const, "ArrayListUnmanaged", null, try gen.createDotAccess(std_import, &.{ "ArrayListUnmanaged" }));
-    const string_type_decl = try gen.addDecl(true, .Const, "String", null, try gen.createFunctionCall(array_list_ref_decl, &.{ try gen.intTypeFrom(u8) }));
+    const string_type_decl = try gen.addDecl(true, .Const, "String", null, try gen.createFunctionCall(array_list_ref_decl, &.{ try gen.intType(u8) }));
 
     const foo_decl = try gen.addDecl(false, .Const, "foo", null, try gen.createLiteral("3"));
-    const bar_decl = try gen.addDecl(false, .Var, "bar", try gen.intTypeFrom(u32), foo_decl);
-    _ = try gen.addDecl(true, .Const, "p_bar", try gen.createPointerType(.One, try gen.intTypeFrom(u32), .{}), try gen.createPrefixOp(.@"&", bar_decl));
+    const bar_decl = try gen.addDecl(false, .Var, "bar", try gen.intType(u32), foo_decl);
+    _ = try gen.addDecl(true, .Const, "p_bar", try gen.createPointerType(.One, try gen.intType(u32), .{}), try gen.createPrefixOp(.@"&", bar_decl));
     _ = try gen.addDecl(true, .Const, "empty_str", string_type_decl, try gen.createLiteral(".{}"));
 
     try std.testing.expectFmt(
