@@ -5,11 +5,11 @@ arena: std.heap.ArenaAllocator,
 top_level_nodes: NodeSet = .{},
 
 raw_literals: StringSet = .{},
+prefix_ops: PrefixOpSet = .{},
 bin_ops: std.ArrayListUnmanaged(BinOp) = .{},
 builtin_calls: std.ArrayListUnmanaged(BuiltinCall) = .{},
 function_calls: std.ArrayListUnmanaged(FunctionCall) = .{},
 optionals: NodeSet = .{},
-addrofs: NodeSet = .{},
 derefs: NodeSet = .{},
 pointers: std.MultiArrayList(Pointer) = .{},
 parentheses_expressions: NodeSet = .{},
@@ -19,16 +19,49 @@ decls: std.MultiArrayList(Decl) = .{},
 contiguous_param_lists: std.ArrayListUnmanaged(Node) = .{},
 
 const StringSet = std.StringArrayHashMapUnmanaged(void);
-const NodeSet = std.AutoArrayHashMapUnmanaged(Node, void);
+const PrefixOpSet = std.ArrayHashMapUnmanaged(
+    PrefixOp,
+    void,
+    struct
+    {
+        pub fn hash(self: @This(), prefix_op: PrefixOp) u32 {
+            _ = self;
+            return @truncate(u32, std.hash.Wyhash.hash(0, std.mem.asBytes(&prefix_op)));
+        }
+        pub fn eql(self: @This(), a: PrefixOp, b: PrefixOp, b_index: usize) bool {
+            _ = self;
+            _ = b_index;
+            return std.meta.eql(a, b);
+        }
+    },
+    true,
+);
+const NodeSet = std.ArrayHashMapUnmanaged(
+    Node,
+    void,
+    struct
+    {
+        pub fn hash(self: @This(), node: Node) u32 {
+            _ = self;
+            return @truncate(u32, std.hash.Wyhash.hash(0, std.mem.asBytes(&node)));
+        }
+        pub fn eql(self: @This(), a: Node, b: Node, b_index: usize) bool {
+            _ = self;
+            _ = b_index;
+            return std.meta.eql(a, b);
+        }
+    },
+    true,
+);
 
-const Node = struct
+const Node = extern struct
 {
     /// refers to the index of the value referred to by the declaration. Which array it indexes into is dependent on `Node.tag`.
     index: Node.Index,
     tag: Node.Tag,
 
     const Index = usize;
-    const Tag = enum(usize)
+    const Tag = enum(u8)
     {
         /// index is the tag value of a `Generator.PrimitiveType`.
         primitive_type,
@@ -38,6 +71,8 @@ const Node = struct
         signed_int,
         /// index into field `Generator.raw_literals`.
         raw_literal,
+        /// index into field `Generator.prefix_ops`.
+        prefix_op,
         /// index into field `Generator.bin_ops`.
         bin_op,
         /// index into field `Generator.builtin_calls`.
@@ -46,8 +81,6 @@ const Node = struct
         function_call,
         /// index into field `Generator.optionals`.
         optional,
-        /// index into field `Generator.addrofs`.
-        addrof,
         /// index into field `Generator.derefs`.
         deref,
         /// index into field `Generator.pointers`.
@@ -63,7 +96,7 @@ const Node = struct
     };
 };
 
-const PrimitiveType = enum
+const PrimitiveType = enum(u8)
 {
     @"isize",
     @"usize",
@@ -86,13 +119,28 @@ const PrimitiveType = enum
     @"comptime_float",
 };
 
-const BinOp = struct
+const PrefixOp = extern struct
+{
+    tag: PrefixOp.Tag,
+    target: Node,
+
+    const Tag = enum(u8)
+    {
+        @"-",
+        @"-%",
+        @"~",
+        @"!",
+        @"&",
+    };
+};
+
+const BinOp = extern struct
 {
     lhs: Node,
     tag: BinOp.Tag,
     rhs: Node,
 
-    const Tag = enum
+    const Tag = enum(u8)
     {
         @"+",
         @"+%",
@@ -142,7 +190,7 @@ const BuiltinCall = struct
     params_end: usize,
 };
 
-const FunctionCall = struct
+const FunctionCall = extern struct
 {
     callable: Node,
     params_start: usize,
@@ -217,14 +265,15 @@ pub fn format(self: Generator, comptime fmt: []const u8, options: std.fmt.Format
     {
         switch (tln.tag)
         {
-            .decl => try writer.print("{}", .{self.fmtDecl(tln.index)}),
+            .decl => try writer.print("{}", .{self.fmtDeclNode(tln.index)}),
             else => unreachable,
         }
     }
 }
 
-fn fmtNode(self: *const Generator, node: Node) std.fmt.Formatter(formatNode)
+fn fmtExprNode(self: *const Generator, node: Node) std.fmt.Formatter(formatExprNode)
 {
+    std.debug.assert(node.tag != .decl);
     return .{
         .data = FormattableNode{
             .gen = self,
@@ -234,7 +283,7 @@ fn fmtNode(self: *const Generator, node: Node) std.fmt.Formatter(formatNode)
 }
 
 const FormattableNode = struct { gen: *const Generator, node: Node };
-fn formatNode(
+fn formatExprNode(
     fmt_node: FormattableNode,
     comptime fmt: []const u8,
     options: std.fmt.FormatOptions,
@@ -252,10 +301,14 @@ fn formatNode(
         .unsigned_int => try writer.print("u{d}", .{@intCast(u16, node.index)}),
         .signed_int => try writer.print("i{d}", .{@intCast(u16, node.index)}),
         .raw_literal => try writer.writeAll(self.raw_literals.keys()[node.index]),
+        .prefix_op => try writer.print("{s}{}", .{
+            @tagName(self.prefix_ops.keys()[node.index].tag),
+            self.fmtExprNode(self.prefix_ops.keys()[node.index].target),
+        }),
         .bin_op => try writer.print("{} {s} {}", .{
-            self.fmtNode(self.bin_ops.items[node.index].lhs),
+            self.fmtExprNode(self.bin_ops.items[node.index].lhs),
             @tagName(self.bin_ops.items[node.index].tag),
-            self.fmtNode(self.bin_ops.items[node.index].rhs),
+            self.fmtExprNode(self.bin_ops.items[node.index].rhs),
         }),
         .builtin_call =>
         {
@@ -265,11 +318,11 @@ fn formatNode(
             try writer.print("@{s}(", .{builtin_call.name});
             for (params[0..params.len - @boolToInt(params.len != 0)]) |param|
             {
-                try writer.print("{}, ", .{self.fmtNode(param)});
+                try writer.print("{}, ", .{self.fmtExprNode(param)});
             }
             if (params.len != 0)
             {
-                try writer.print("{}", .{self.fmtNode(params[params.len - 1])});
+                try writer.print("{}", .{self.fmtExprNode(params[params.len - 1])});
             }
             try writer.writeByte(')');
         },
@@ -278,20 +331,19 @@ fn formatNode(
             const function_call: FunctionCall = self.function_calls.items[node.index];
             const params: []const Node = self.contiguous_param_lists.items[function_call.params_start..function_call.params_end];
 
-            try writer.print("{}(", .{self.fmtNode(function_call.callable)});
+            try writer.print("{}(", .{self.fmtExprNode(function_call.callable)});
             for (params[0..params.len - @boolToInt(params.len != 0)]) |param|
             {
-                try writer.print("{}, ", .{self.fmtNode(param)});
+                try writer.print("{}, ", .{self.fmtExprNode(param)});
             }
             if (params.len != 0)
             {
-                try writer.print("{}", .{self.fmtNode(params[params.len - 1])});
+                try writer.print("{}", .{self.fmtExprNode(params[params.len - 1])});
             }
             try writer.writeByte(')');
         },
-        .optional => try writer.print("?{}", .{self.fmtNode(self.optionals.keys()[node.index])}),
-        .addrof => try writer.print("&{}", .{self.fmtNode(self.addrofs.keys()[node.index])}),
-        .deref => try writer.print("{}.*", .{self.fmtNode(self.derefs.keys()[node.index])}),
+        .optional => try writer.print("?{}", .{self.fmtExprNode(self.optionals.keys()[node.index])}),
+        .deref => try writer.print("{}.*", .{self.fmtExprNode(self.derefs.keys()[node.index])}),
         .pointer =>
         {
             const slice = self.pointers.slice();
@@ -326,14 +378,14 @@ fn formatNode(
                 .Many =>
                 {
                     try if (pointer.sentinel) |s|
-                        writer.print("[*:{}]", .{self.fmtNode(s)})
+                        writer.print("[*:{}]", .{self.fmtExprNode(s)})
                     else
                         writer.writeAll("[*]");
                 },
                 .Slice =>
                 {
                     try if (pointer.sentinel) |s|
-                        writer.print("[:{}]", .{self.fmtNode(s)})
+                        writer.print("[:{}]", .{self.fmtExprNode(s)})
                     else
                         writer.writeAll("[]"); 
                 },
@@ -350,26 +402,26 @@ fn formatNode(
                 .unsigned_int,
                 .signed_int,
                 .raw_literal,
+                .bin_op,
                 .builtin_call,
                 .function_call,
-                .decl_ref,
                 .optional,
+                .deref,
                 .pointer,
                 .parentheses_expression,
                 .dot_access,
-                .deref,
-                .bin_op,
-                => try writer.print("{}", .{self.fmtNode(children[node.index])}),
-                .addrof,
+                .decl_ref,
+                => try writer.print("{}", .{self.fmtExprNode(children[node.index])}),
+                .prefix_op,
                 .decl,
                 => unreachable,
             }
         },
-        .parentheses_expression => try writer.print("({})", .{self.fmtNode(self.parentheses_expressions.keys()[node.index])}),
+        .parentheses_expression => try writer.print("({})", .{self.fmtExprNode(self.parentheses_expressions.keys()[node.index])}),
         .dot_access =>
         {
             const dot_access: DotAccess = self.dot_accesses.items[node.index];
-            try writer.print("{}", .{self.fmtNode(dot_access.lhs)});
+            try writer.print("{}", .{self.fmtExprNode(dot_access.lhs)});
             for (dot_access.rhs) |rhs|
             {
                 try writer.print(".{s}", .{std.zig.fmtId(rhs)});
@@ -431,7 +483,7 @@ fn formatNode(
     }
 }
 
-fn fmtDecl(self: *const Generator, decl_index: Node.Index) std.fmt.Formatter(formatDecl)
+fn fmtDeclNode(self: *const Generator, decl_index: Node.Index) std.fmt.Formatter(formatDeclNode)
 {
     return .{
         .data = FormattableDecl{
@@ -442,7 +494,7 @@ fn fmtDecl(self: *const Generator, decl_index: Node.Index) std.fmt.Formatter(for
 }
 
 const FormattableDecl = struct { gen: *const Generator, index: Node.Index };
-fn formatDecl(
+fn formatDeclNode(
     fmt_decl: FormattableDecl,
     comptime fmt: []const u8,
     options: std.fmt.FormatOptions,
@@ -461,15 +513,15 @@ fn formatDecl(
         {
             try writer.writeAll(if (decl.flags.is_const) "const " else "var ");
             try writer.print("{s}", .{std.zig.fmtId(decl.name)});
-            if (decl.type_annotation) |ta| try writer.print(": {}", .{self.fmtNode(ta)});
-            try writer.print(" = {};\n", .{self.fmtNode(decl.value.?)});
+            if (decl.type_annotation) |ta| try writer.print(": {}", .{self.fmtExprNode(ta)});
+            try writer.print(" = {};\n", .{self.fmtExprNode(decl.value.?)});
         },
         .static =>
         {
             try writer.writeAll("extern ");
             try writer.writeAll(if (decl.flags.is_const) "const " else "var ");
             try writer.print("{s}", .{std.zig.fmtId(decl.name)});
-            try writer.print(": {};\n", .{self.fmtNode(decl.type_annotation.?)});
+            try writer.print(": {};\n", .{self.fmtExprNode(decl.type_annotation.?)});
             std.debug.assert(decl.value == null);
         },
         .dyn => |lib_str|
@@ -477,7 +529,7 @@ fn formatDecl(
             try writer.print("extern \"{s}\" ", .{lib_str});
             try writer.writeAll(if (decl.flags.is_const) "const " else "var ");
             try writer.print("{s}", .{std.zig.fmtId(decl.name)});
-            try writer.print(": {};\n", .{self.fmtNode(decl.type_annotation.?)});
+            try writer.print(": {};\n", .{self.fmtExprNode(decl.type_annotation.?)});
             std.debug.assert(decl.value == null);
         },
     }
@@ -529,6 +581,18 @@ pub fn createLiteral(self: *Generator, literal_str: []const u8) std.mem.Allocato
     return Node{
         .index = gop.index,
         .tag = .raw_literal,
+    };
+}
+
+pub fn createPrefixOp(self: *Generator, op: PrefixOp.Tag, target: Node) std.mem.Allocator.Error!Node
+{
+    const gop = try self.prefix_ops.getOrPut(self.allocator(), PrefixOp{
+        .tag = op,
+        .target = target,
+    });
+    return Node{
+        .index = gop.index,
+        .tag = .prefix_op,
     };
 }
 
@@ -603,15 +667,6 @@ pub fn createOptionalType(self: *Generator, node: Node) std.mem.Allocator.Error!
     return Node{
         .index = gop.index,
         .tag = .optional,
-    };
-}
-
-pub fn createAddressOf(self: *Generator, node: Node) std.mem.Allocator.Error!Node
-{
-    const gop = try self.addrofs.getOrPut(self.allocator(), node);
-    return Node{
-        .index = gop.index,
-        .tag = .addrof,
     };
 }
 
@@ -772,7 +827,7 @@ fn createDeclaration(
 
 fn expectNodeFmt(gen: *Generator, expected: []const u8, node: Node) !void
 {
-    return std.testing.expectFmt(expected, "{}", .{gen.fmtNode(node)});
+    return std.testing.expectFmt(expected, "{}", .{gen.fmtExprNode(node)});
 }
 
 test "node printing"
@@ -786,8 +841,7 @@ test "node printing"
 
     try gen.expectNodeFmt("u32", u32_type);
     try gen.expectNodeFmt("43",  literal_43);
-    try gen.expectNodeFmt("&@as(u32, 43)", try gen.createAddressOf(try gen.createBuiltinCall("as", &.{ u32_type, literal_43 })));
-    try gen.expectNodeFmt("@as(*u32, 43).*", try gen.createDeref(try gen.createBuiltinCall("as", &.{ p_u32_type, literal_43 })));
+    try gen.expectNodeFmt("@as(*u32, undefined).*", try gen.createDeref(try gen.createBuiltinCall("as", &.{ p_u32_type, try gen.createLiteral("undefined") })));
     try gen.expectNodeFmt("@This()", try gen.createBuiltinCall("This", &.{}));
     try gen.expectNodeFmt("type", try gen.primitiveTypeFrom(type));
     try gen.expectNodeFmt("(43)", try gen.createParenthesesExpression(literal_43));
@@ -833,7 +887,7 @@ test "top level decls"
 
     const foo_decl = try gen.addDecl(false, .Const, "foo", null, try gen.createLiteral("3"));
     const bar_decl = try gen.addDecl(false, .Var, "bar", try gen.intTypeFrom(u32), foo_decl);
-    _ = try gen.addDecl(true, .Const, "p_bar", try gen.createPointerType(.One, try gen.intTypeFrom(u32), .{}), try gen.createAddressOf(bar_decl));
+    _ = try gen.addDecl(true, .Const, "p_bar", try gen.createPointerType(.One, try gen.intTypeFrom(u32), .{}), try gen.createPrefixOp(.@"&", bar_decl));
     _ = try gen.addDecl(true, .Const, "empty_str", string_type_decl, try gen.createLiteral(".{}"));
 
     try std.testing.expectFmt(
