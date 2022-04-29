@@ -903,7 +903,7 @@ fn expectNodeFmt(gen: *Generator, expected: []const u8, node: Node) !void
     };
 }
 
-test "node printing"
+test "basic node printing"
 {
     var gen = Generator.init(std.testing.allocator);
     defer gen.deinit();
