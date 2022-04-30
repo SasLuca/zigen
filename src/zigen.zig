@@ -8,6 +8,11 @@ pub fn writeStream(out_stream: anytype) WriteStream(@TypeOf(out_stream))
     return WriteStream(@TypeOf(out_stream)).init(out_stream);
 }
 
+pub const Visibility = enum {
+    private,
+    public,
+};
+
 pub fn WriteStream(comptime OutStream: type) type 
 {
     return struct 
@@ -34,11 +39,20 @@ pub fn WriteStream(comptime OutStream: type) type
             try self.stream.print(code, args);
         }
 
-        pub fn beginEnum(self: *Self, is_pub: bool, comptime name: []const u8, args: anytype) !void
+        pub fn beginEnum(self: *Self, visibility: Visibility, comptime name: []const u8, args: anytype) !void
         {
             try self.writeIndent();
-            if (is_pub) try self.stream.print("pub ", .{});
+            if (visibility == .public) try self.stream.print("pub ", .{});
             try self.stream.print("const " ++ name ++ " = enum {{\n", args);
+            self.whitespace.indent_level += 1;
+        }
+
+        pub fn beginEnumWithTag(self: *Self, visibility: Visibility, comptime name: []const u8, name_args: anytype, comptime tag: []const u8, tag_args: anytype) !void
+        {
+            try self.writeIndent();
+            if (visibility == .public) try self.stream.print("pub ", .{});
+            try self.stream.print("const " ++ name, name_args);
+            try self.stream.print(" = enum(" ++ tag ++ ") {{\n", tag_args);
             self.whitespace.indent_level += 1;
         }
 
@@ -121,7 +135,7 @@ test "generate enum"
     const out = stream.writer();
 
     var w = writeStream(out);
-    try w.beginEnum(true, "Test", .{});
+    try w.beginEnum(.public, "Test", .{});
     try w.writeEnumConstant("test", .{});
     try w.endEnum();
     
@@ -137,6 +151,29 @@ test "generate enum"
     try std.testing.expect(std.mem.eql(u8, expected, result));
 }
 
+test "generate private enum"
+{
+    var out_buf: [1024]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&out_buf);
+    const out = stream.writer();
+
+    var w = writeStream(out);
+    try w.beginEnum(.private, "Test", .{});
+    try w.writeEnumConstant("test", .{});
+    try w.endEnum();
+    
+    const result = stream.getWritten();
+
+    const expected =
+        \\const Test = enum {
+        \\    test,
+        \\};
+        \\
+    ;
+
+    try std.testing.expect(std.mem.eql(u8, expected, result));
+}
+
 test "generate enum with multiple constants"
 {
     var out_buf: [1024]u8 = undefined;
@@ -144,7 +181,7 @@ test "generate enum with multiple constants"
     const out = stream.writer();
 
     var w = writeStream(out);
-    try w.beginEnum(true, "Test", .{});
+    try w.beginEnum(.public, "Test", .{});
     try w.writeEnumConstant("test1", .{});
     try w.writeEnumConstant("test2", .{});
     try w.writeEnumConstant("test3", .{});
@@ -157,6 +194,29 @@ test "generate enum with multiple constants"
         \\    test1,
         \\    test2,
         \\    test3,
+        \\};
+        \\
+    ;
+
+    try std.testing.expect(std.mem.eql(u8, expected, result));
+}
+
+test "generate enum with tag"
+{
+    var out_buf: [1024]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&out_buf);
+    const out = stream.writer();
+
+    var w = writeStream(out);
+    try w.beginEnumWithTag(.public, "Test", .{}, "c_int", .{});
+    try w.writeEnumConstant("test", .{});
+    try w.endEnum();
+    
+    const result = stream.getWritten();
+
+    const expected =
+        \\pub const Test = enum(c_int) {
+        \\    test,
         \\};
         \\
     ;

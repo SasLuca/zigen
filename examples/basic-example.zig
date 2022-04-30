@@ -8,7 +8,7 @@ pub fn main() !void
     const out = stream.writer();
 
     var w = zigen.writeStream(out);
-    try w.beginEnum(true, "Test", .{});
+    try w.beginEnum(.public, "Test", .{});
     try w.writeEnumConstant("test1", .{});
     try w.writeEnumConstant("test2", .{});
     try w.writeEnumConstant("test3", .{});
