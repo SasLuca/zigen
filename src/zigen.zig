@@ -4,7 +4,7 @@ const Generator = @This();
 arena: std.heap.ArenaAllocator,
 top_level_nodes: NodeSet = .{},
 
-raw_literals: StringSet = .{},
+raw_literals: std.ArrayListUnmanaged([]const u8) = .{},
 prefix_ops: PrefixOpSet = .{},
 bin_ops: std.ArrayListUnmanaged(BinOp) = .{},
 postfix_ops: PostfixOpSet = .{},
@@ -23,19 +23,19 @@ contiguous_param_lists: std.ArrayListUnmanaged(Node) = .{},
 /// string set to avoid duplicating the same string multiple times.
 string_set: StringSet = .{},
 
+const StringSet = std.StringHashMapUnmanaged(void);
 fn getString(self: *Generator, str: []const u8) std.mem.Allocator.Error![]const u8
 {
     const gop = try self.string_set.getOrPut(self.allocator(), str);
     if (!gop.found_existing) {
         gop.key_ptr.* = self.allocator().dupe(u8, str) catch |err| {
-            _ = self.string_set.pop();
+            std.debug.assert(self.string_set.remove(str));
             return err;
         };
     }
     return gop.key_ptr.*;
 }
 
-const StringSet = std.StringArrayHashMapUnmanaged(void);
 fn ExternStructArraySet(comptime T: type) type {
     const Context = struct
     {
@@ -323,7 +323,7 @@ fn formatExprNode(
         .unsigned_int => try writer.print("u{d}", .{@intCast(u16, node.index)}),
         .signed_int => try writer.print("i{d}", .{@intCast(u16, node.index)}),
         .primitive_value => try writer.writeAll(@tagName(@intToEnum(PrimitiveValue, node.index))),
-        .raw_literal => try writer.writeAll(self.raw_literals.keys()[node.index]),
+        .raw_literal => try writer.writeAll(self.raw_literals.items[node.index]),
         .prefix_op => try writer.print("{s}{}", .{
             @tagName(self.prefix_ops.keys()[node.index].tag),
             self.fmtExprNode(self.prefix_ops.keys()[node.index].target),
@@ -633,21 +633,11 @@ pub fn intType(self: *Generator, comptime T: type) error{}!Node
 
 pub fn createLiteral(self: *Generator, literal_str: []const u8) std.mem.Allocator.Error!Node
 {
-    const gop = try self.raw_literals.getOrPut(self.allocator(), literal_str);
-    errdefer {
-        if (!gop.found_existing)
-        {
-            _ = self.string_set.pop();
-        }
-    }
-
-    if (!gop.found_existing)
-    {
-        gop.key_ptr.* = try self.getString(literal_str);
-    }
+    const new_index = self.raw_literals.items.len;
+    try self.raw_literals.append(self.allocator(), try self.getString(literal_str));
 
     return Node{
-        .index = gop.index,
+        .index = new_index,
         .tag = .raw_literal,
     };
 }
