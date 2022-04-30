@@ -3,10 +3,17 @@ const zigen = @import("zigen");
 
 pub fn main() !void
 {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
+    var out_buf: [1024]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&out_buf);
+    const out = stream.writer();
+
+    var w = zigen.writeStream(out);
+    try w.beginEnum(true, "Test", .{});
+    try w.writeEnumConstant("test1", .{});
+    try w.writeEnumConstant("test2", .{});
+    try w.writeEnumConstant("test3", .{});
+    try w.endEnum();
     
-    var generator = zigen.Generator.init(gpa.allocator());
-    _ = generator;
-    std.log.info("Basic Example", .{});
+    const result = stream.getWritten();
+    std.debug.print("{s}", .{result});
 }
