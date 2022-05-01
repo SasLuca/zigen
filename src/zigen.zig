@@ -601,11 +601,11 @@ pub fn createPrimitiveValue(self: *Generator, tag: PrimitiveValue) error{}!ExprN
         .tag = .primitive_value,
     };
 }
-pub fn trueVale(self: *Generator) error{}!ExprNode
+pub fn trueValue(self: *Generator) error{}!ExprNode
 {
     return self.createPrimitiveValue(.@"true");
 }
-pub fn falseVale(self: *Generator) error{}!ExprNode
+pub fn falseValue(self: *Generator) error{}!ExprNode
 {
     return self.createPrimitiveValue(.@"false");
 }
