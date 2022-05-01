@@ -20,7 +20,7 @@ decls: std.MultiArrayList(Decl) = .{},
 usingnamespace_statements: ExprNodeSet = .{},
 
 /// referenced by `Generator.builtin_calls` and `Generator.function_calls`.
-contiguous_param_lists: std.ArrayListUnmanaged(ExprNode) = .{},
+contiguous_arg_lists: std.ArrayListUnmanaged(ExprNode) = .{},
 /// string set to avoid duplicating the same string multiple times.
 string_set: StringSet = .{},
 
@@ -350,7 +350,7 @@ fn formatExprNode(
         .builtin_call =>
         {
             const builtin_call: BuiltinCall = self.builtin_calls.items[node.index];
-            const params: []const ExprNode = self.contiguous_param_lists.items[builtin_call.params_start..builtin_call.params_end];
+            const params: []const ExprNode = self.contiguous_arg_lists.items[builtin_call.params_start..builtin_call.params_end];
 
             try writer.print("@{s}(", .{builtin_call.name});
             for (params[0..params.len - @boolToInt(params.len != 0)]) |param|
@@ -366,7 +366,7 @@ fn formatExprNode(
         .function_call =>
         {
             const function_call: FunctionCall = self.function_calls.items[node.index];
-            const params: []const ExprNode = self.contiguous_param_lists.items[function_call.params_start..function_call.params_end];
+            const params: []const ExprNode = self.contiguous_arg_lists.items[function_call.params_start..function_call.params_end];
 
             try writer.print("{}(", .{self.fmtExprNode(function_call.callable)});
             for (params[0..params.len - @boolToInt(params.len != 0)]) |param|
@@ -720,9 +720,9 @@ pub fn createBuiltinCall(self: *Generator, builtin_name: []const u8, params: []c
 
     const duped_name = try self.dupeString(builtin_name);
 
-    const params_start = self.contiguous_param_lists.items.len;
-    try self.contiguous_param_lists.appendSlice(self.allocator(), params);
-    const params_end = self.contiguous_param_lists.items.len;
+    const params_start = self.contiguous_arg_lists.items.len;
+    try self.contiguous_arg_lists.appendSlice(self.allocator(), params);
+    const params_end = self.contiguous_arg_lists.items.len;
 
     new.* = .{
         .name = duped_name,
@@ -742,9 +742,9 @@ pub fn createFunctionCall(self: *Generator, callable: ExprNode, params: []const 
     const new = try self.function_calls.addOne(self.allocator());
     errdefer _ = self.function_calls.pop();
 
-    const params_start = self.contiguous_param_lists.items.len;
-    try self.contiguous_param_lists.appendSlice(self.allocator(), params);
-    const params_end = self.contiguous_param_lists.items.len;
+    const params_start = self.contiguous_arg_lists.items.len;
+    try self.contiguous_arg_lists.appendSlice(self.allocator(), params);
+    const params_end = self.contiguous_arg_lists.items.len;
 
     new.* = .{
         .callable = callable,
