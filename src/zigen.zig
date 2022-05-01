@@ -915,13 +915,16 @@ fn expectNodeFmt(gen: *Generator, expected: []const u8, node: anytype) !void
         ExprNode,
         StatementNode,
     };
-    comptime {
+    comptime
+    {
         var msg: []const u8 = "Expected one of ";
         for (node_types) |NodeType|
         {
             if (@TypeOf(node) == NodeType) break;
             msg = msg ++ "'" ++ @typeName(NodeType) ++ "', ";
-        } else {
+        }
+        else
+        {
             msg = msg ++ ".\n";
             @compileError(msg);
         }
