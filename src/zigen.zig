@@ -2,7 +2,7 @@ const std = @import("std");
 
 const Generator = @This();
 arena: std.heap.ArenaAllocator,
-top_level_nodes: NodeSet = .{},
+top_level_nodes: StatementNodeSet = .{},
 
 raw_literals: std.ArrayListUnmanaged([]const u8) = .{},
 prefix_ops: PrefixOpSet = .{},
@@ -10,16 +10,16 @@ bin_ops: std.ArrayListUnmanaged(BinOp) = .{},
 postfix_ops: PostfixOpSet = .{},
 builtin_calls: std.ArrayListUnmanaged(BuiltinCall) = .{},
 function_calls: std.ArrayListUnmanaged(FunctionCall) = .{},
-optionals: NodeSet = .{},
-derefs: NodeSet = .{},
+optionals: ExprNodeSet = .{},
+derefs: ExprNodeSet = .{},
 pointers: std.MultiArrayList(Pointer) = .{},
-parentheses_expressions: NodeSet = .{},
+parentheses_expressions: ExprNodeSet = .{},
 dot_accesses: std.ArrayListUnmanaged(DotAccess) = .{},
 decls: std.MultiArrayList(Decl) = .{},
-usingnamespace_statements: NodeSet = .{},
+usingnamespace_statements: ExprNodeSet = .{},
 
 /// referenced by `Generator.builtin_calls` and `Generator.function_calls`.
-contiguous_param_lists: std.ArrayListUnmanaged(Node) = .{},
+contiguous_param_lists: std.ArrayListUnmanaged(ExprNode) = .{},
 /// string set to avoid duplicating the same string multiple times.
 string_set: StringSet = .{},
 
@@ -53,16 +53,32 @@ fn ExternStructArraySet(comptime T: type) type {
 }
 const PrefixOpSet = ExternStructArraySet(PrefixOp);
 const PostfixOpSet = ExternStructArraySet(PostfixOp);
-const NodeSet = ExternStructArraySet(Node);
+const ExprNodeSet = ExternStructArraySet(ExprNode);
+const StatementNodeSet = ExternStructArraySet(StatementNode);
 
-const Node = extern struct
+pub const StatementNode = extern struct
 {
-    /// refers to the index of the value referred to by the declaration. Which array it indexes into is dependent on `Node.tag`.
-    index: Node.Index,
-    tag: Node.Tag,
+    /// meaning is dicated by `StatementNode.tag`.
+    index: StatementNode.Index,
+    tag: StatementNode.Tag,
 
-    const Index = usize;
-    const Tag = enum(u8)
+    pub const Index = usize;
+    pub const Tag = enum(u8)
+    {
+        /// index into field `Generator.decls`.
+        decl,
+        /// index into field `Generator.usingnamespace_statements`.
+        @"usingnamespace",
+    };
+};
+pub const ExprNode = extern struct
+{
+    /// meaning is dicated by `ExprNode.tag`.
+    index: ExprNode.Index,
+    tag: ExprNode.Tag,
+
+    pub const Index = usize;
+    pub const Tag = enum(u8)
     {
         /// index is the tag value of a `Generator.PrimitiveType`.
         primitive_type,
@@ -93,11 +109,7 @@ const Node = extern struct
         /// index into field `Generator.dot_accesses`.
         dot_access,
         /// index into field `Generator.decls`.
-        decl,
-        /// index into field `Generator.decls`.
         decl_ref,
-        /// index into field `Generator.usingnamespace_statements`.
-        usingnamespace_statement,
     };
 };
 
@@ -135,7 +147,7 @@ const PrimitiveValue = enum(u8)
 const PrefixOp = extern struct
 {
     tag: PrefixOp.Tag,
-    target: Node,
+    target: ExprNode,
 
     const Tag = enum(u8)
     {
@@ -148,9 +160,9 @@ const PrefixOp = extern struct
 };
 const BinOp = extern struct
 {
-    lhs: Node,
+    lhs: ExprNode,
     tag: BinOp.Tag,
-    rhs: Node,
+    rhs: ExprNode,
 
     const Tag = enum(u8)
     {
@@ -197,7 +209,7 @@ const BinOp = extern struct
 const PostfixOp = extern struct
 {
     tag: PostfixOp.Tag,
-    target: Node,
+    target: ExprNode,
 
     const Tag = enum(u8) { @".?", @".*" };
 };
@@ -211,7 +223,7 @@ const BuiltinCall = struct
 
 const FunctionCall = extern struct
 {
-    callable: Node,
+    callable: ExprNode,
     params_start: usize,
     params_end: usize,
 };
@@ -220,8 +232,8 @@ const Pointer = struct
 {
     size: std.builtin.Type.Pointer.Size,
     alignment: ?u29,
-    child: Node,
-    sentinel: ?Node,
+    child: ExprNode,
+    sentinel: ?ExprNode,
     flags: Flags,
 
     const Flags = packed struct {
@@ -233,19 +245,19 @@ const Pointer = struct
 
 const DotAccess = struct
 {
-    lhs: Node,
+    lhs: ExprNode,
     rhs: []const []const u8,
 };
 
 const Decl = struct
 {
     /// refers to the index of the parent container declaration, with 'null' meaning file scope.
-    parent_index: ?Node.Index,
+    parent_index: ?ExprNode.Index,
     extern_mod: ExternMod,
     flags: Decl.Flags,
     name: []const u8,
-    type_annotation: ?Node,
-    value: ?Node,
+    type_annotation: ?ExprNode,
+    value: ?ExprNode,
 
     const ExternMod = union(enum)
     {
@@ -285,17 +297,14 @@ pub fn format(self: Generator, comptime fmt: []const u8, options: std.fmt.Format
         switch (tln.tag)
         {
             .decl,
-            .usingnamespace_statement,
+            .@"usingnamespace",
             => try writer.print("{}", .{self.fmtStatementNode(tln)}),
-            else => unreachable,
         }
     }
 }
 
-fn fmtExprNode(self: *const Generator, node: Node) std.fmt.Formatter(formatExprNode)
+fn fmtExprNode(self: *const Generator, node: ExprNode) std.fmt.Formatter(formatExprNode)
 {
-    std.debug.assert(node.tag != .decl);
-    std.debug.assert(node.tag != .usingnamespace_statement);
     return .{
         .data = FormattableExprNode{
             .gen = self,
@@ -304,7 +313,7 @@ fn fmtExprNode(self: *const Generator, node: Node) std.fmt.Formatter(formatExprN
     };
 }
 
-const FormattableExprNode = struct { gen: *const Generator, node: Node };
+const FormattableExprNode = struct { gen: *const Generator, node: ExprNode };
 fn formatExprNode(
     fmt_node: FormattableExprNode,
     comptime fmt: []const u8,
@@ -340,7 +349,7 @@ fn formatExprNode(
         .builtin_call =>
         {
             const builtin_call: BuiltinCall = self.builtin_calls.items[node.index];
-            const params: []const Node = self.contiguous_param_lists.items[builtin_call.params_start..builtin_call.params_end];
+            const params: []const ExprNode = self.contiguous_param_lists.items[builtin_call.params_start..builtin_call.params_end];
 
             try writer.print("@{s}(", .{builtin_call.name});
             for (params[0..params.len - @boolToInt(params.len != 0)]) |param|
@@ -356,7 +365,7 @@ fn formatExprNode(
         .function_call =>
         {
             const function_call: FunctionCall = self.function_calls.items[node.index];
-            const params: []const Node = self.contiguous_param_lists.items[function_call.params_start..function_call.params_end];
+            const params: []const ExprNode = self.contiguous_param_lists.items[function_call.params_start..function_call.params_end];
 
             try writer.print("{}(", .{self.fmtExprNode(function_call.callable)});
             for (params[0..params.len - @boolToInt(params.len != 0)]) |param|
@@ -374,7 +383,7 @@ fn formatExprNode(
         {
             const slice = self.pointers.slice();
             const flags: []const Pointer.Flags = slice.items(.flags);
-            const children: []const Node = slice.items(.child);
+            const children: []const ExprNode = slice.items(.child);
 
             const pointer = Pointer{
                 .size = slice.items(.size)[node.index],
@@ -440,8 +449,6 @@ fn formatExprNode(
                 => try writer.print("{}", .{self.fmtExprNode(children[node.index])}),
                 .primitive_value => unreachable,
                 .prefix_op => unreachable,
-                .decl => unreachable,
-                .usingnamespace_statement => unreachable,
             }
         },
         .parentheses_expression => try writer.print("({})", .{self.fmtExprNode(self.parentheses_expressions.keys()[node.index])}),
@@ -454,7 +461,6 @@ fn formatExprNode(
                 try writer.print(".{s}", .{std.zig.fmtId(rhs)});
             }
         },
-        .decl => unreachable,
         .decl_ref =>
         {
             const slice = self.decls.slice();
@@ -463,10 +469,10 @@ fn formatExprNode(
             const ParentIndexIterator = struct
             {
                 const ParentIndexIterator = @This();
-                parent_indices: []const ?Node.Index,
+                parent_indices: []const ?ExprNode.Index,
                 current_parent_idx: ?usize,
 
-                fn next(it: *ParentIndexIterator) ?Node.Index
+                fn next(it: *ParentIndexIterator) ?ExprNode.Index
                 {
                     if (it.current_parent_idx) |idx|
                     {
@@ -507,11 +513,10 @@ fn formatExprNode(
             }
             try writer.print("{s}", .{std.zig.fmtId(names[node.index])});
         },
-        .usingnamespace_statement => unreachable,
     }
 }
 
-fn fmtStatementNode(self: *const Generator, node: Node) std.fmt.Formatter(formatDeclNode)
+fn fmtStatementNode(self: *const Generator, node: StatementNode) std.fmt.Formatter(formatDeclNode)
 {
     return .{
         .data = FormattableStatementNode{
@@ -521,7 +526,7 @@ fn fmtStatementNode(self: *const Generator, node: Node) std.fmt.Formatter(format
     };
 }
 
-const FormattableStatementNode = struct { gen: *const Generator, node: Node };
+const FormattableStatementNode = struct { gen: *const Generator, node: StatementNode };
 fn formatDeclNode(
     fmt_decl: FormattableStatementNode,
     comptime fmt: []const u8,
@@ -566,8 +571,7 @@ fn formatDeclNode(
                 },
             }
         },
-        .usingnamespace_statement => try writer.print("usingnamespace {};\n", .{self.fmtExprNode(self.usingnamespace_statements.keys()[node.index])}),
-        else => unreachable,
+        .@"usingnamespace" => try writer.print("usingnamespace {};\n", .{self.fmtExprNode(self.usingnamespace_statements.keys()[node.index])}),
     }
 }
 
@@ -576,48 +580,48 @@ fn allocator(self: *Generator) std.mem.Allocator
     return self.arena.allocator();
 }
 
-pub fn primitiveType(self: *Generator, tag: PrimitiveType) error{}!Node
+pub fn primitiveType(self: *Generator, tag: PrimitiveType) error{}!ExprNode
 {
     _ = self;
-    return Node{
+    return ExprNode{
         .index = @enumToInt(tag),
         .tag = .primitive_type,
     };
 }
-pub fn primType(self: *Generator, comptime T: type) error{}!Node
+pub fn primType(self: *Generator, comptime T: type) error{}!ExprNode
 {
     return self.primitiveType(@field(PrimitiveType, @typeName(T)));
 }
 
-pub fn createPrimitiveValue(self: *Generator, tag: PrimitiveValue) error{}!Node
+pub fn createPrimitiveValue(self: *Generator, tag: PrimitiveValue) error{}!ExprNode
 {
     _ = self;
-    return Node{
+    return ExprNode{
         .index = @enumToInt(tag),
         .tag = .primitive_value,
     };
 }
-pub fn trueVale(self: *Generator) error{}!Node
+pub fn trueVale(self: *Generator) error{}!ExprNode
 {
     return self.createPrimitiveValue(.@"true");
 }
-pub fn falseVale(self: *Generator) error{}!Node
+pub fn falseVale(self: *Generator) error{}!ExprNode
 {
     return self.createPrimitiveValue(.@"false");
 }
-pub fn nullValue(self: *Generator) error{}!Node
+pub fn nullValue(self: *Generator) error{}!ExprNode
 {
     return self.createPrimitiveValue(.@"null");
 }
-pub fn undefinedValue(self: *Generator) error{}!Node
+pub fn undefinedValue(self: *Generator) error{}!ExprNode
 {
     return self.createPrimitiveValue(.@"undefined");
 }
 
-pub fn createIntType(self: *Generator, sign: std.builtin.Signedness, bits: u16) error{}!Node
+pub fn createIntType(self: *Generator, sign: std.builtin.Signedness, bits: u16) error{}!ExprNode
 {
     _ = self;
-    return Node{
+    return ExprNode{
         .index = bits,
         .tag = switch (sign) {
             .signed => .signed_int,
@@ -625,40 +629,40 @@ pub fn createIntType(self: *Generator, sign: std.builtin.Signedness, bits: u16) 
         },
     };
 }
-pub fn intType(self: *Generator, comptime T: type) error{}!Node
+pub fn intType(self: *Generator, comptime T: type) error{}!ExprNode
 {
     const info: std.builtin.Type.Int = @typeInfo(T).Int;
     return self.createIntType(info.signedness, info.bits);
 }
 
-pub fn createLiteral(self: *Generator, literal_str: []const u8) std.mem.Allocator.Error!Node
+pub fn createLiteral(self: *Generator, literal_str: []const u8) std.mem.Allocator.Error!ExprNode
 {
     const new_index = self.raw_literals.items.len;
     try self.raw_literals.append(self.allocator(), try self.getString(literal_str));
 
-    return Node{
+    return ExprNode{
         .index = new_index,
         .tag = .raw_literal,
     };
 }
-pub fn createStringLiteral(self: *Generator, content: []const u8) std.mem.Allocator.Error!Node
+pub fn createStringLiteral(self: *Generator, content: []const u8) std.mem.Allocator.Error!ExprNode
 {
     return self.createLiteral(try std.fmt.allocPrint(self.allocator(), "\"{s}\"", .{content}));
 }
 
-pub fn createPrefixOp(self: *Generator, op: PrefixOp.Tag, target: Node) std.mem.Allocator.Error!Node
+pub fn createPrefixOp(self: *Generator, op: PrefixOp.Tag, target: ExprNode) std.mem.Allocator.Error!ExprNode
 {
     const gop = try self.prefix_ops.getOrPut(self.allocator(), PrefixOp{
         .tag = op,
         .target = target,
     });
-    return Node{
+    return ExprNode{
         .index = gop.index,
         .tag = .prefix_op,
     };
 }
 
-pub fn createBinOp(self: *Generator, lhs: Node, op: BinOp.Tag, rhs: Node) std.mem.Allocator.Error!Node
+pub fn createBinOp(self: *Generator, lhs: ExprNode, op: BinOp.Tag, rhs: ExprNode) std.mem.Allocator.Error!ExprNode
 {
     const new_index = self.bin_ops.items.len;
     const new = try self.bin_ops.addOne(self.allocator());
@@ -670,25 +674,25 @@ pub fn createBinOp(self: *Generator, lhs: Node, op: BinOp.Tag, rhs: Node) std.me
         .rhs = rhs,
     };
 
-    return Node{
+    return ExprNode{
         .index = new_index,
         .tag = .bin_op,
     };
 }
 
-pub fn createPostfixOp(self: *Generator, target: Node, op: PostfixOp.Tag) std.mem.Allocator.Error!Node
+pub fn createPostfixOp(self: *Generator, target: ExprNode, op: PostfixOp.Tag) std.mem.Allocator.Error!ExprNode
 {
     const gop = try self.postfix_ops.getOrPut(self.allocator(), PostfixOp{
         .tag = op,
         .target = target,
     });
-    return Node{
+    return ExprNode{
         .index = gop.index,
         .tag = .postfix_op,
     };
 }
 
-pub fn createBuiltinCall(self: *Generator, builtin_name: []const u8, params: []const Node) std.mem.Allocator.Error!Node
+pub fn createBuiltinCall(self: *Generator, builtin_name: []const u8, params: []const ExprNode) std.mem.Allocator.Error!ExprNode
 {
     const new_index = self.builtin_calls.items.len;
     const new = try self.builtin_calls.addOne(self.allocator());
@@ -706,13 +710,13 @@ pub fn createBuiltinCall(self: *Generator, builtin_name: []const u8, params: []c
         .params_end = params_end,
     };
 
-    return Node{
+    return ExprNode{
         .index = new_index,
         .tag = .builtin_call,
     };
 }
 
-pub fn createFunctionCall(self: *Generator, callable: Node, params: []const Node) std.mem.Allocator.Error!Node
+pub fn createFunctionCall(self: *Generator, callable: ExprNode, params: []const ExprNode) std.mem.Allocator.Error!ExprNode
 {
     const new_index = self.function_calls.items.len;
     const new = try self.function_calls.addOne(self.allocator());
@@ -728,16 +732,16 @@ pub fn createFunctionCall(self: *Generator, callable: Node, params: []const Node
         .params_end = params_end,
     };
 
-    return Node{
+    return ExprNode{
         .index = new_index,
         .tag = .function_call,
     };
 }
 
-pub fn createOptionalType(self: *Generator, node: Node) std.mem.Allocator.Error!Node
+pub fn createOptionalType(self: *Generator, node: ExprNode) std.mem.Allocator.Error!ExprNode
 {
     const gop = try self.optionals.getOrPut(self.allocator(), node);
-    return Node{
+    return ExprNode{
         .index = gop.index,
         .tag = .optional,
     };
@@ -746,14 +750,14 @@ pub fn createOptionalType(self: *Generator, node: Node) std.mem.Allocator.Error!
 pub fn createPointerType(
     self: *Generator,
     size: std.builtin.Type.Pointer.Size,
-    child: Node,
+    child: ExprNode,
     extra: struct
     {
-        sentinel: ?Node = null,
+        sentinel: ?ExprNode = null,
         alignment: ?u29 = null,
         flags: Pointer.Flags = .{ .is_allowzero = false, .is_const = false, .is_volatile = false },
     },
-) std.mem.Allocator.Error!Node
+) std.mem.Allocator.Error!ExprNode
 {
     try self.pointers.ensureUnusedCapacity(self.allocator(), 1);
     const new_index = self.pointers.addOneAssumeCapacity();
@@ -767,22 +771,22 @@ pub fn createPointerType(
         .flags = extra.flags,
     });
 
-    return Node{
+    return ExprNode{
         .index = new_index,
         .tag = .pointer,
     };
 }
 
-pub fn createParenthesesExpression(self: *Generator, node: Node) std.mem.Allocator.Error!Node
+pub fn createParenthesesExpression(self: *Generator, node: ExprNode) std.mem.Allocator.Error!ExprNode
 {
     const gop = try self.parentheses_expressions.getOrPut(self.allocator(), node);
-    return Node{
+    return ExprNode{
         .index = gop.index,
         .tag = .parentheses_expression,
     };
 }
 
-pub fn createDotAccess(self: *Generator, lhs: Node, rhs: []const []const u8) std.mem.Allocator.Error!Node
+pub fn createDotAccess(self: *Generator, lhs: ExprNode, rhs: []const []const u8) std.mem.Allocator.Error!ExprNode
 {
     const new_index = self.dot_accesses.items.len;
     const new_dot_access = try self.dot_accesses.addOne(self.allocator());
@@ -811,7 +815,7 @@ pub fn createDotAccess(self: *Generator, lhs: Node, rhs: []const []const u8) std
         .lhs = lhs,
         .rhs = strings.toOwnedSlice(),
     };
-    return Node{
+    return ExprNode{
         .index = new_index,
         .tag = .dot_access,
     };
@@ -823,9 +827,9 @@ pub fn addDecl(
     is_pub: bool,
     mutability: Mutability,
     name: []const u8,
-    type_annotation: ?Node,
-    value: Node,
-) std.mem.Allocator.Error!Node
+    type_annotation: ?ExprNode,
+    value: ExprNode,
+) std.mem.Allocator.Error!ExprNode
 {
     const decl_node = try self.createDeclaration(null, is_pub, .none, mutability, name, type_annotation, value);
     errdefer {
@@ -834,38 +838,38 @@ pub fn addDecl(
     }
 
     try self.top_level_nodes.putNoClobber(self.allocator(), decl_node, {});
-    return Node{
+    return ExprNode{
         .index = decl_node.index,
         .tag = .decl_ref,
     };
 }
 
-pub fn addUsingnamespace(self: *Generator, target: Node) std.mem.Allocator.Error!void
+pub fn addUsingnamespace(self: *Generator, target: ExprNode) std.mem.Allocator.Error!void
 {
     const usingnamespace_node = try self.createUsingnamespace(target);
     errdefer _ = self.usingnamespace_statements.pop();
     try self.top_level_nodes.putNoClobber(self.allocator(), usingnamespace_node, {});
 }
 
-pub fn createUsingnamespace(self: *Generator, target: Node) std.mem.Allocator.Error!Node
+pub fn createUsingnamespace(self: *Generator, target: ExprNode) std.mem.Allocator.Error!StatementNode
 {
     const gop = try self.usingnamespace_statements.getOrPut(self.allocator(), target);
-    return Node{
+    return StatementNode{
         .index = gop.index,
-        .tag = .usingnamespace_statement,
+        .tag = .@"usingnamespace",
     };
 }
 
 fn createDeclaration(
     self: *Generator,
-    parent_index: ?Node.Index,
+    parent_index: ?ExprNode.Index,
     is_pub: bool,
     extern_mod: Decl.ExternMod,
     mutability: Mutability,
     name: []const u8,
-    type_annotation: ?Node,
-    value: ?Node,
-) std.mem.Allocator.Error!Node
+    type_annotation: ?ExprNode,
+    value: ?ExprNode,
+) std.mem.Allocator.Error!StatementNode
 {
     try self.decls.ensureUnusedCapacity(self.allocator(), 1);
     const new_index = self.decls.addOneAssumeCapacity();
@@ -898,17 +902,35 @@ fn createDeclaration(
         .value = value,
     });
 
-    return Node{
+    return StatementNode{
         .index = new_index,
         .tag = .decl,
     };
 }
 
-fn expectNodeFmt(gen: *Generator, expected: []const u8, node: Node) !void
+fn expectNodeFmt(gen: *Generator, expected: []const u8, node: anytype) !void
 {
-    return switch (node.tag) {
-        .decl, .usingnamespace_statement => std.testing.expectFmt(expected, "{}", .{gen.fmtStatementNode(node)}),
-        else => std.testing.expectFmt(expected, "{}", .{gen.fmtExprNode(node)}),
+    const node_types = [_]type
+    {
+        ExprNode,
+        StatementNode,
+    };
+    comptime {
+        var msg: []const u8 = "Expected one of ";
+        for (node_types) |NodeType|
+        {
+            if (@TypeOf(node) == NodeType) break;
+            msg = msg ++ "'" ++ @typeName(NodeType) ++ "', ";
+        } else {
+            msg = msg ++ ".\n";
+            @compileError(msg);
+        }
+    }
+    return switch (@TypeOf(node))
+    {
+        ExprNode => std.testing.expectFmt(expected, "{}", .{gen.fmtExprNode(node)}),
+        StatementNode => std.testing.expectFmt(expected, "{}", .{gen.fmtStatementNode(node)}),
+        else => unreachable,
     };
 }
 
