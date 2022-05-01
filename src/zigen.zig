@@ -4,7 +4,7 @@ const Generator = @This();
 arena: std.heap.ArenaAllocator,
 top_level_nodes: StatementNodeSet = .{},
 
-raw_literals: std.ArrayListUnmanaged([]const u8) = .{},
+raw_literals: std.StringArrayHashMapUnmanaged(void) = .{},
 prefix_ops: PrefixOpSet = .{},
 bin_ops: std.ArrayListUnmanaged(BinOp) = .{},
 postfix_ops: PostfixOpSet = .{},
@@ -15,6 +15,7 @@ derefs: ExprNodeSet = .{},
 pointers: std.MultiArrayList(Pointer) = .{},
 parentheses_expressions: ExprNodeSet = .{},
 dot_accesses: std.ArrayListUnmanaged(DotAccess) = .{},
+
 decls: std.MultiArrayList(Decl) = .{},
 usingnamespace_statements: ExprNodeSet = .{},
 
@@ -24,7 +25,7 @@ contiguous_param_lists: std.ArrayListUnmanaged(ExprNode) = .{},
 string_set: StringSet = .{},
 
 const StringSet = std.StringHashMapUnmanaged(void);
-fn getString(self: *Generator, str: []const u8) std.mem.Allocator.Error![]const u8
+fn dupeString(self: *Generator, str: []const u8) std.mem.Allocator.Error![]const u8
 {
     const gop = try self.string_set.getOrPut(self.allocator(), str);
     if (!gop.found_existing) {
@@ -332,7 +333,7 @@ fn formatExprNode(
         .unsigned_int => try writer.print("u{d}", .{@intCast(u16, node.index)}),
         .signed_int => try writer.print("i{d}", .{@intCast(u16, node.index)}),
         .primitive_value => try writer.writeAll(@tagName(@intToEnum(PrimitiveValue, node.index))),
-        .raw_literal => try writer.writeAll(self.raw_literals.items[node.index]),
+        .raw_literal => try writer.writeAll(self.raw_literals.keys()[node.index]),
         .prefix_op => try writer.print("{s}{}", .{
             @tagName(self.prefix_ops.keys()[node.index].tag),
             self.fmtExprNode(self.prefix_ops.keys()[node.index].target),
@@ -637,17 +638,36 @@ pub fn intType(self: *Generator, comptime T: type) error{}!ExprNode
 
 pub fn createLiteral(self: *Generator, literal_str: []const u8) std.mem.Allocator.Error!ExprNode
 {
-    const new_index = self.raw_literals.items.len;
-    try self.raw_literals.append(self.allocator(), try self.getString(literal_str));
+    const gop = try self.raw_literals.getOrPut(self.allocator(), literal_str);
+    if (!gop.found_existing)
+    {
+        gop.key_ptr.* = self.dupeString(literal_str) catch |err|
+        {
+            const popped_str = self.raw_literals.pop().key;
+            if (@import("builtin").mode == .Debug)
+            {
+                std.debug.assert(std.mem.eql(u8, popped_str, literal_str));
+            }
+            return err;
+        };
+    }
 
     return ExprNode{
-        .index = new_index,
+        .index = gop.index,
         .tag = .raw_literal,
     };
 }
 pub fn createStringLiteral(self: *Generator, content: []const u8) std.mem.Allocator.Error!ExprNode
 {
-    return self.createLiteral(try std.fmt.allocPrint(self.allocator(), "\"{s}\"", .{content}));
+    const quoted_literal_str = try std.fmt.allocPrint(self.allocator(), "\"{s}\"", .{content});
+    defer self.allocator().free(quoted_literal_str);
+    return self.createLiteral(quoted_literal_str);
+}
+pub fn createLiteralFmt(self: *Generator, comptime fmt: []const u8, args: anytype) std.mem.Allocator.Error!ExprNode
+{
+    const formatted_str = try std.fmt.allocPrint(self.allocator(), fmt, args);
+    defer self.allocator().free(formatted_str);
+    return self.createLiteral(formatted_str);
 }
 
 pub fn createPrefixOp(self: *Generator, op: PrefixOp.Tag, target: ExprNode) std.mem.Allocator.Error!ExprNode
@@ -698,7 +718,7 @@ pub fn createBuiltinCall(self: *Generator, builtin_name: []const u8, params: []c
     const new = try self.builtin_calls.addOne(self.allocator());
     errdefer _ = self.builtin_calls.pop();
 
-    const duped_name = try self.getString(builtin_name);
+    const duped_name = try self.dupeString(builtin_name);
 
     const params_start = self.contiguous_param_lists.items.len;
     try self.contiguous_param_lists.appendSlice(self.allocator(), params);
@@ -879,7 +899,7 @@ fn createDeclaration(
     {
         .none, .static => extern_mod,
         .dyn => |str| Decl.ExternMod{
-            .dyn = try self.getString(str),
+            .dyn = try self.dupeString(str),
         },
     };
     errdefer {
@@ -891,7 +911,7 @@ fn createDeclaration(
         self.allocator().free(str);
     }
 
-    const duped_name = try self.getString(name);
+    const duped_name = try self.dupeString(name);
 
     self.decls.set(new_index, Decl{
         .parent_index = parent_index,
