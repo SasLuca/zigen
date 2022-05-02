@@ -5,6 +5,8 @@ arena: std.heap.ArenaAllocator,
 top_level_nodes: StatementNodeSet = .{},
 
 raw_literals: std.StringArrayHashMapUnmanaged(void) = .{},
+char_literals: std.StringArrayHashMapUnmanaged(void) = .{},
+string_literals: std.StringArrayHashMapUnmanaged(void) = .{},
 list_inits: std.ArrayListUnmanaged(ListInit) = .{},
 prefix_ops: PrefixOpSet = .{},
 bin_ops: std.ArrayListUnmanaged(BinOp) = .{},
@@ -12,7 +14,6 @@ postfix_ops: PostfixOpSet = .{},
 builtin_calls: std.ArrayListUnmanaged(BuiltinCall) = .{},
 function_calls: std.ArrayListUnmanaged(FunctionCall) = .{},
 optionals: ExprNodeSet = .{},
-derefs: ExprNodeSet = .{},
 pointers: std.MultiArrayList(Pointer) = .{},
 parentheses_expressions: ExprNodeSet = .{},
 dot_accesses: std.ArrayListUnmanaged(DotAccess) = .{},
@@ -70,7 +71,7 @@ pub const StatementNode = extern struct
         /// index into field `Generator.decls`.
         decl,
         /// index into field `Generator.usingnamespace_statements`.
-        @"usingnamespace",
+        usingnamespace_statement,
     };
 };
 pub const ExprNode = extern struct
@@ -87,13 +88,27 @@ pub const ExprNode = extern struct
         /// index is the tag value of a `Generator.PrimitiveType`.
         primitive_type,
         /// index is the number of bits of the unsigned integer.
-        unsigned_int,
+        unsigned_int_type,
         /// index is the number of bits of the signed integer.
-        signed_int,
+        signed_int_type,
         /// index is the tag value of a `Generator.PrimitiveValue`.
         primitive_value,
+
+        /// index is the value of a decimal integer literal.
+        addr_sized_int_decimal,
+        /// index is the value of a hex integer literal.
+        addr_sized_int_hex,
+        /// index is the value of an octal integer literal.
+        addr_sized_int_octal,
+        /// index is the value of a binrary integer literal.
+        addr_sized_int_binary,
+
         /// index into field `Generator.raw_literals`.
         raw_literal,
+        /// index into field `Generator.char_literals`.
+        char_literal,
+        /// index into field `Generator.string_literals`.
+        string_literal,
         /// index into field `Generator.list_inits`.
         list_init,
         /// index into field `Generator.prefix_ops`.
@@ -335,7 +350,7 @@ pub fn format(self: Generator, comptime fmt: []const u8, options: std.fmt.Format
         switch (tln.tag)
         {
             .decl,
-            .@"usingnamespace",
+            .usingnamespace_statement,
             => try writer.print("{}", .{self.fmtStatementNode(tln)}),
         }
     }
@@ -368,10 +383,18 @@ fn formatExprNode(
     {
         .invalid => unreachable,
         .primitive_type => try writer.writeAll(@tagName(@intToEnum(PrimitiveType, node.index))),
-        .unsigned_int => try writer.print("u{d}", .{@intCast(u16, node.index)}),
-        .signed_int => try writer.print("i{d}", .{@intCast(u16, node.index)}),
+        .unsigned_int_type => try writer.print("u{d}", .{@intCast(u16, node.index)}),
+        .signed_int_type => try writer.print("i{d}", .{@intCast(u16, node.index)}),
         .primitive_value => try writer.writeAll(@tagName(@intToEnum(PrimitiveValue, node.index))),
+
+        .addr_sized_int_decimal => try writer.print("{d}", .{node.index}),
+        .addr_sized_int_hex => try writer.print("{x}", .{node.index}),
+        .addr_sized_int_octal => try writer.print("{o}", .{node.index}),
+        .addr_sized_int_binary => try writer.print("{b}", .{node.index}),
+
         .raw_literal => try writer.writeAll(self.raw_literals.keys()[node.index]),
+        .char_literal => try writer.print("'{s}'", .{self.char_literals.keys()[node.index]}),
+        .string_literal => try writer.print("\"{s}\"", .{self.string_literals.keys()[node.index]}),
         .list_init =>
         {
             const list_init: ListInit = self.list_inits.items[node.index];
@@ -522,8 +545,8 @@ fn formatExprNode(
             switch (pointer.child.tag)
             {
                 .primitive_type,
-                .unsigned_int,
-                .signed_int,
+                .unsigned_int_type,
+                .signed_int_type,
                 .raw_literal,
                 .bin_op,
                 .postfix_op,
@@ -536,7 +559,15 @@ fn formatExprNode(
                 .pointer,
                 => try writer.print("{}", .{self.fmtExprNode(children[node.index])}),
                 .invalid => unreachable,
+
+                .addr_sized_int_decimal => unreachable,
+                .addr_sized_int_hex => unreachable,
+                .addr_sized_int_octal => unreachable,
+                .addr_sized_int_binary => unreachable,
+
                 .primitive_value => unreachable,
+                .char_literal => unreachable,
+                .string_literal => unreachable,
                 .list_init => unreachable,
                 .prefix_op => unreachable,
             }
@@ -606,7 +637,7 @@ fn formatExprNode(
     }
 }
 
-fn fmtStatementNode(self: *const Generator, node: StatementNode) std.fmt.Formatter(formatDeclNode)
+fn fmtStatementNode(self: *const Generator, node: StatementNode) std.fmt.Formatter(formatStatementNode)
 {
     return .{
         .data = FormattableStatementNode{
@@ -617,7 +648,7 @@ fn fmtStatementNode(self: *const Generator, node: StatementNode) std.fmt.Formatt
 }
 
 const FormattableStatementNode = struct { gen: *const Generator, node: StatementNode };
-fn formatDeclNode(
+fn formatStatementNode(
     fmt_decl: FormattableStatementNode,
     comptime fmt: []const u8,
     options: std.fmt.FormatOptions,
@@ -661,14 +692,17 @@ fn formatDeclNode(
                 },
             }
         },
-        .@"usingnamespace" => try writer.print("usingnamespace {};\n", .{self.fmtExprNode(self.usingnamespace_statements.keys()[node.index])}),
+        .usingnamespace_statement => try writer.print("usingnamespace {};\n", .{self.fmtExprNode(self.usingnamespace_statements.keys()[node.index])}),
     }
 }
 
-fn allocator(self: *Generator) std.mem.Allocator
+usingnamespace struct
 {
-    return self.arena.allocator();
-}
+    pub fn allocator(self: *Generator) std.mem.Allocator
+    {
+        return self.arena.allocator();
+    }
+};
 
 fn invalidExprNode(index_value: ExprNode.Index) ExprNode
 {
@@ -719,8 +753,8 @@ pub fn createIntType(sign: std.builtin.Signedness, bits: u16) ExprNode
     return ExprNode{
         .index = bits,
         .tag = switch (sign) {
-            .signed => .signed_int,
-            .unsigned => .unsigned_int,
+            .signed => .signed_int_type,
+            .unsigned => .unsigned_int_type,
         },
     };
 }
@@ -728,6 +762,26 @@ pub fn intType(comptime T: type) ExprNode
 {
     const info: std.builtin.Type.Int = @typeInfo(T).Int;
     return createIntType(info.signedness, info.bits);
+}
+
+pub const IntLiteralRadix = enum
+{
+    decimal,
+    hex,
+    octal,
+    binary
+};
+pub fn createAddrSizeIntLiteral(radix: IntLiteralRadix, value: ExprNode.Index) ExprNode
+{
+    return ExprNode{
+        .index = value,
+        .tag = switch (radix) {
+            .decimal => .addr_sized_int_decimal,
+            .hex => .addr_sized_int_hex,
+            .octal => .addr_sized_int_octal,
+            .binary => .addr_sized_int_binary,
+        },
+    };
 }
 
 pub fn createListInit(
@@ -778,17 +832,65 @@ pub fn createLiteral(self: *Generator, literal_str: []const u8) std.mem.Allocato
         .tag = .raw_literal,
     };
 }
-pub fn createStringLiteral(self: *Generator, content: []const u8) std.mem.Allocator.Error!ExprNode
-{
-    const quoted_literal_str = try std.fmt.allocPrint(self.allocator(), "\"{s}\"", .{content});
-    defer self.allocator().free(quoted_literal_str);
-    return self.createLiteral(quoted_literal_str);
-}
 pub fn createLiteralFmt(self: *Generator, comptime fmt: []const u8, args: anytype) std.mem.Allocator.Error!ExprNode
 {
-    const formatted_str = try std.fmt.allocPrint(self.allocator(), fmt, args);
-    defer self.allocator().free(formatted_str);
+    const formatted_str = try std.fmt.allocPrint(self.arena.child_allocator, fmt, args);
+    defer self.arena.child_allocator.free(formatted_str);
     return self.createLiteral(formatted_str);
+}
+
+pub const CreateCharLiteralError = error{
+    InvalidEscapeCharacter,
+    ExpectedHexDigit,
+    EmptyUnicodeEscapeSequence,
+    ExpectedHexDigitOrRbrace,
+    InvalidUnicodeCodepoint,
+    ExpectedLBrace,
+    ExpectedRBrace,
+    ExpectedSingleQuote,
+    InvalidCharacter,
+};
+pub fn createCharLiteral(self: *Generator, char_literal_content: []const u8) (std.mem.Allocator.Error || CreateCharLiteralError)!ExprNode
+{
+    std.debug.assert(char_literal_content.len >= 1);
+    { // validate char literal content.
+        const with_single_quotes = try std.fmt.allocPrint(self.arena.child_allocator, "'{s}'", .{char_literal_content});
+        defer self.arena.child_allocator.free(with_single_quotes);
+
+        try switch (std.zig.parseCharLiteral(with_single_quotes))
+        {
+            .success => {},
+            .failure => |err| switch (err)
+            {
+                .invalid_escape_character => error.InvalidEscapeCharacter,
+                .expected_hex_digit => error.ExpectedHexDigit,
+                .empty_unicode_escape_sequence => error.EmptyUnicodeEscapeSequence,
+                .expected_hex_digit_or_rbrace => error.ExpectedHexDigitOrRbrace,
+                .invalid_unicode_codepoint => error.InvalidUnicodeCodepoint,
+                .expected_lbrace => error.ExpectedLBrace,
+                .expected_rbrace => error.ExpectedRBrace,
+                .expected_single_quote => error.ExpectedSingleQuote,
+                .invalid_character => error.InvalidCharacter,
+            },
+        };
+    }
+
+    const duped_char_literal_content = try self.dupeString(char_literal_content);
+    const gop = try self.char_literals.getOrPut(self.allocator(), duped_char_literal_content);
+    return ExprNode{
+        .index = gop.index,
+        .tag = .char_literal,
+    };
+}
+
+pub fn createStringLiteral(self: *Generator, content: []const u8) std.mem.Allocator.Error!ExprNode
+{
+    const duped_content = try self.dupeString(content);
+    const gop = try self.string_literals.getOrPut(self.allocator(), duped_content);
+    return ExprNode{
+        .index = gop.index,
+        .tag = .string_literal,
+    };
 }
 
 pub fn createPrefixOp(self: *Generator, op: PrefixOp.Tag, target: ExprNode) std.mem.Allocator.Error!ExprNode
@@ -1008,7 +1110,7 @@ pub fn createUsingnamespace(self: *Generator, target: ExprNode) std.mem.Allocato
     const gop = try self.usingnamespace_statements.getOrPut(self.allocator(), target);
     return StatementNode{
         .index = gop.index,
-        .tag = .@"usingnamespace",
+        .tag = .usingnamespace_statement,
     };
 }
 
@@ -1091,11 +1193,13 @@ fn expectNodeFmt(gen: *Generator, expected: []const u8, node: anytype) !void
 
 test "basic node printing"
 {
-    var gen = Generator.init(std.testing.allocator);
+    const allocator = std.testing.allocator;
+
+    var gen = Generator.init(allocator);
     defer gen.deinit();
 
     const u32_type = Generator.intType(u32);
-    const literal_43 = try gen.createLiteral("43");
+    const literal_43 = Generator.createAddrSizeIntLiteral(.decimal, 43);
     const p_u32_type = try gen.createPointerType(.One, u32_type, .{});
 
     try gen.expectNodeFmt("u32", u32_type);
@@ -1108,8 +1212,8 @@ test "basic node printing"
 
     try gen.expectNodeFmt(".{}", try gen.createListInit(.none, &.{}));
     try gen.expectNodeFmt(".{43}", try gen.createListInit(.none, &.{literal_43}));
-    try gen.expectNodeFmt(".{ 43, 43 }", try gen.createListInit(.none, &.{ literal_43, try gen.createLiteral("43") }));
-    try gen.expectNodeFmt(".{ 43, 43, 42 }", try gen.createListInit(.none, &.{ literal_43, try gen.createLiteral("43"), try gen.createLiteral("42") }));
+    try gen.expectNodeFmt(".{ 43, 43 }", try gen.createListInit(.none, &.{ literal_43, literal_43 }));
+    try gen.expectNodeFmt(".{ 43, 43, 42 }", try gen.createListInit(.none, &.{ literal_43, literal_43, Generator.createAddrSizeIntLiteral(.decimal, 42) }));
     try gen.expectNodeFmt(
         \\.{
         \\    'a',
@@ -1118,24 +1222,24 @@ test "basic node printing"
         \\    'd',
         \\}
     , try gen.createListInit(.none, &.{
-        try gen.createLiteral("'a'"),
-        try gen.createLiteral("'b'"),
-        try gen.createLiteral("'c'"),
-        try gen.createLiteral("'d'"),
+        try gen.createCharLiteral("a"),
+        try gen.createCharLiteral("b"),
+        try gen.createCharLiteral("c"),
+        try gen.createCharLiteral("d"),
     }));
     try gen.expectNodeFmt("[_]u32{}", try gen.createListInit(@unionInit(ListInit.Annotations, "some", .{ .type = u32_type }), &.{}));
     try gen.expectNodeFmt("[0]u32{}", try gen.createListInit(@unionInit(ListInit.Annotations, "some", .{
         .type = u32_type,
-        .len = try gen.createLiteral("0"),
+        .len = Generator.createAddrSizeIntLiteral(.decimal, 0),
     }), &.{}));
     try gen.expectNodeFmt("[_:0]u32{}", try gen.createListInit(@unionInit(ListInit.Annotations, "some", .{
         .type = u32_type,
-        .sentinel = try gen.createLiteral("0"),
+        .sentinel = Generator.createAddrSizeIntLiteral(.decimal, 0),
     }), &.{}));
     try gen.expectNodeFmt("[0:0]u32{}", try gen.createListInit(@unionInit(ListInit.Annotations, "some", .{
         .type = u32_type,
-        .len = try gen.createLiteral("0"),
-        .sentinel = try gen.createLiteral("0"),
+        .len = Generator.createAddrSizeIntLiteral(.decimal, 0),
+        .sentinel = Generator.createAddrSizeIntLiteral(.decimal, 0),
     }), &.{}));
 
     try gen.expectNodeFmt("*u32", p_u32_type);
@@ -1145,24 +1249,24 @@ test "basic node printing"
     try gen.expectNodeFmt("[*]u32", try gen.createPointerType(.Many, u32_type, .{}));
     try gen.expectNodeFmt("[]u32", try gen.createPointerType(.Slice, u32_type, .{}));
     try gen.expectNodeFmt("[:0]u32", try gen.createPointerType(.Slice, u32_type, .{
-        .sentinel = try gen.createLiteral("0"),
+        .sentinel = Generator.createAddrSizeIntLiteral(.decimal, 0),
     }));
     try gen.expectNodeFmt("[:0]align(16) u32", try gen.createPointerType(.Slice, u32_type, .{
-        .sentinel = try gen.createLiteral("0"),
+        .sentinel = Generator.createAddrSizeIntLiteral(.decimal, 0),
         .alignment = try gen.createLiteral("16"),
     }));
     try gen.expectNodeFmt("[:0]allowzero align(16) u32", try gen.createPointerType(.Slice, u32_type, .{
-        .sentinel = try gen.createLiteral("0"),
+        .sentinel = Generator.createAddrSizeIntLiteral(.decimal, 0),
         .alignment = try gen.createLiteral("16"),
         .flags = .{ .is_allowzero = true, .is_const = false, .is_volatile = false },
     }));
     try gen.expectNodeFmt("[:0]allowzero align(16) const u32", try gen.createPointerType(.Slice, u32_type, .{
-        .sentinel = try gen.createLiteral("0"),
+        .sentinel = Generator.createAddrSizeIntLiteral(.decimal, 0),
         .alignment = try gen.createLiteral("16"),
         .flags = .{ .is_allowzero = true, .is_const = true, .is_volatile = false },
     }));
     try gen.expectNodeFmt("[:0]allowzero align(16) const volatile u32", try gen.createPointerType(.Slice, u32_type, .{
-        .sentinel = try gen.createLiteral("0"),
+        .sentinel = Generator.createAddrSizeIntLiteral(.decimal, 0),
         .alignment = try gen.createLiteral("16"),
         .flags = .{ .is_allowzero = true, .is_const = true, .is_volatile = true },
     }));
@@ -1204,7 +1308,9 @@ test "basic node printing"
 
 test "top level decls"
 {
-    var gen = Generator.init(std.testing.allocator);
+    const allocator = std.testing.allocator;
+
+    var gen = Generator.init(allocator);
     defer gen.deinit();
 
     const std_import = try gen.addDecl(false, .Const, "std", null, try gen.createBuiltinCall("import", &.{ try gen.createStringLiteral("std") }));
