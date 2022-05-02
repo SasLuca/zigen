@@ -4,7 +4,7 @@ const Generator = @This();
 arena: std.heap.ArenaAllocator,
 top_level_nodes: StatementNodeSet = .{},
 
-raw_literals: std.StringArrayHashMapUnmanaged(void) = .{},
+raw_code_literals: std.StringArrayHashMapUnmanaged(void) = .{},
 big_int_literals: ExternStructArraySet(BigIntRange) = .{},
 char_literals: std.StringArrayHashMapUnmanaged(void) = .{},
 string_literals: std.StringArrayHashMapUnmanaged(void) = .{},
@@ -117,8 +117,8 @@ pub const ExprNode = extern struct
         /// index into field `Generator.big_int_literals`.
         big_int_literal_binary,
 
-        /// index into field `Generator.raw_literals`.
-        raw_literal,
+        /// index into field `Generator.raw_code_literals`.
+        raw_code_literal,
         /// index into field `Generator.char_literals`.
         char_literal,
         /// index into field `Generator.string_literals`.
@@ -444,7 +444,7 @@ fn formatExprNode(
             try writer.print("{s}", .{str});
         },
 
-        .raw_literal => try writer.writeAll(self.raw_literals.keys()[node.index]),
+        .raw_code_literal => try writer.writeAll(self.raw_code_literals.keys()[node.index]),
         .char_literal => try writer.print("'{s}'", .{self.char_literals.keys()[node.index]}),
         .string_literal => try writer.print("\"{s}\"", .{self.string_literals.keys()[node.index]}),
         .list_init =>
@@ -593,7 +593,7 @@ fn formatExprNode(
                 .primitive_type,
                 .unsigned_int_type,
                 .signed_int_type,
-                .raw_literal,
+                .raw_code_literal,
                 .bin_op,
                 .postfix_op,
                 .builtin_call,
@@ -946,14 +946,14 @@ pub fn createListInit(
     };
 }
 
-pub fn createLiteral(self: *Generator, literal_str: []const u8) std.mem.Allocator.Error!ExprNode
+pub fn createRawCode(self: *Generator, literal_str: []const u8) std.mem.Allocator.Error!ExprNode
 {
-    const gop = try self.raw_literals.getOrPut(self.allocator(), literal_str);
+    const gop = try self.raw_code_literals.getOrPut(self.allocator(), literal_str);
     if (!gop.found_existing)
     {
         gop.key_ptr.* = self.dupeString(literal_str) catch |err|
         {
-            const popped_str = self.raw_literals.pop().key;
+            const popped_str = self.raw_code_literals.pop().key;
             if (@import("builtin").mode == .Debug)
             {
                 std.debug.assert(std.mem.eql(u8, popped_str, literal_str));
@@ -964,14 +964,14 @@ pub fn createLiteral(self: *Generator, literal_str: []const u8) std.mem.Allocato
 
     return ExprNode{
         .index = gop.index,
-        .tag = .raw_literal,
+        .tag = .raw_code_literal,
     };
 }
-pub fn createLiteralFmt(self: *Generator, comptime fmt: []const u8, args: anytype) std.mem.Allocator.Error!ExprNode
+pub fn createRawCodeFmt(self: *Generator, comptime fmt: []const u8, args: anytype) std.mem.Allocator.Error!ExprNode
 {
     const formatted_str = try std.fmt.allocPrint(self.arena.child_allocator, fmt, args);
     defer self.arena.child_allocator.free(formatted_str);
-    return self.createLiteral(formatted_str);
+    return self.createRawCode(formatted_str);
 }
 
 pub const CreateCharLiteralError = error{
@@ -1410,23 +1410,23 @@ test "node printing behavior"
 
     try gen.expectNodeFmt(
         "const foo = 3;\n",
-        try gen.createDeclaration(null, false, .none, .Const, "foo", Generator.invalidExprNode(undefined), try gen.createLiteral("3")),
+        try gen.createDeclaration(null, false, .none, .Const, "foo", Generator.invalidExprNode(undefined), try gen.createIntLiteral(.decimal, 3)),
     );
     try gen.expectNodeFmt(
         "pub const foo = 3;\n",
-        try gen.createDeclaration(null, true, .none, .Const, "foo", Generator.invalidExprNode(undefined), try gen.createLiteral("3")),
+        try gen.createDeclaration(null, true, .none, .Const, "foo", Generator.invalidExprNode(undefined), try gen.createIntLiteral(.decimal, 3)),
     );
     try gen.expectNodeFmt(
         "pub const foo = 3;\n",
-        try gen.createDeclaration(null, true, .none, .Const, "foo", Generator.invalidExprNode(undefined), try gen.createLiteral("3")),
+        try gen.createDeclaration(null, true, .none, .Const, "foo", Generator.invalidExprNode(undefined), try gen.createIntLiteral(.decimal, 3)),
     );
     try gen.expectNodeFmt(
         "pub const foo: u32 = 3;\n",
-        try gen.createDeclaration(null, true, .none, .Const, "foo", u32_type, try gen.createLiteral("3")),
+        try gen.createDeclaration(null, true, .none, .Const, "foo", u32_type, try gen.createIntLiteral(.decimal, 3)),
     );
     try gen.expectNodeFmt(
         "pub var foo: u32 = 3;\n",
-        try gen.createDeclaration(null, true, .none, .Var, "foo", u32_type, try gen.createLiteral("3")),
+        try gen.createDeclaration(null, true, .none, .Var, "foo", u32_type, try gen.createIntLiteral(.decimal, 3)),
     );
     try gen.expectNodeFmt(
         "pub extern var foo: u32;\n",
@@ -1454,10 +1454,10 @@ test "top level decls"
     const array_list_ref_decl = try gen.addDecl(false, .Const, "ArrayListUnmanaged", null, try gen.createDotAccess(std_import, &.{ "ArrayListUnmanaged" }));
     const string_type_decl = try gen.addDecl(true, .Const, "String", null, try gen.createFunctionCall(array_list_ref_decl, &.{ Generator.intType(u8) }));
 
-    const foo_decl = try gen.addDecl(false, .Const, "foo", null, try gen.createLiteral("3"));
+    const foo_decl = try gen.addDecl(false, .Const, "foo", null, try gen.createIntLiteral(.decimal, 3));
     const bar_decl = try gen.addDecl(false, .Var, "bar", Generator.intType(u32), foo_decl);
     _ = try gen.addDecl(true, .Const, "p_bar", try gen.createPointerType(.One, Generator.intType(u32), .{}), try gen.createPrefixOp(.@"&", bar_decl));
-    _ = try gen.addDecl(true, .Const, "empty_str", string_type_decl, try gen.createLiteral(".{}"));
+    _ = try gen.addDecl(true, .Const, "empty_str", string_type_decl, try gen.createListInit(.none, &.{}));
 
     try std.testing.expectFmt(
         \\const std = @import("std");
