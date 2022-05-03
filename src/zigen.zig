@@ -1408,16 +1408,7 @@ pub fn addDecl(
     value: ExprNode,
 ) std.mem.Allocator.Error!ExprNode
 {
-    if (type_annotation) |ta| {
-        std.debug.assert(ta.tag != .sentinel);
-    }
-    const decl_node = try self.createDeclaration(mutability, name, type_annotation, value, .{
-        .parent_index = null,
-        .is_pub = is_pub,
-        .extern_mod = .none,
-        .alignment = null,
-        .@"linksection" = null,
-    });
+    const decl_node = try self.createDeclaration(mutability, name, type_annotation, value, .{ .is_pub = is_pub });
     errdefer {
         self.decls.shrinkRetainingCapacity(self.decls.len - 1);
         std.debug.assert(self.decls.len == decl_node.index);
