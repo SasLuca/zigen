@@ -1,5 +1,6 @@
 const std = @import("std");
 
+// zig fmt: off
 const Generator = @This();
 arena: std.heap.ArenaAllocator,
 top_level_nodes: ExternStructArraySet(StatementNode) = .{},
@@ -159,10 +160,29 @@ pub const StatementNode = extern struct
     pub const Index = usize;
     pub const Tag = enum(u8)
     {
+        /// contextual sentinel node.
+        sentinel,
         /// index into field `Generator.decls`.
-        decl,
+        decl_const,
+        /// index into field `Generator.decls`.
+        decl_var,
+        /// index into field `Generator.decls`.
+        decl_pub_const,
+        /// index into field `Generator.decls`.
+        decl_pub_var,
         /// index into field `Generator.ordered_node_set`.
         usingnamespace_statement,
+        /// index into field `Generator.ordered_node_set`.
+        pub_usingnamespace_statement,
+    };
+
+    fn unwrap(self: StatementNode) ?StatementNode
+    {
+        return if (self.tag != .sentinel) self else null;
+    }
+    const sentinel = StatementNode{
+        .index = std.math.maxInt(StatementNode.Index),
+        .tag = .sentinel,
     };
 };
 pub const ExprNode = extern struct
@@ -175,7 +195,7 @@ pub const ExprNode = extern struct
     pub const Tag = enum(u8)
     {
         /// contextual sentinel node.
-        invalid,
+        sentinel,
         /// index is the tag value of a `Generator.PrimitiveType`.
         primitive_type,
         /// index is the number of bits of the unsigned integer.
@@ -233,10 +253,14 @@ pub const ExprNode = extern struct
         decl_ref,
     };
 
-    fn nullIfInvalid(self: ExprNode) ?ExprNode
+    fn unwrap(self: ExprNode) ?ExprNode
     {
-        return if (self.tag != .invalid) self else null;
+        return if (self.tag != .sentinel) self else null;
     }
+    const sentinel = ExprNode{
+        .index = std.math.maxInt(ExprNode.Index),
+        .tag = .sentinel,
+    };
 };
 
 const PrimitiveType = enum(ExprNode.Index)
@@ -512,9 +536,10 @@ const Decl = struct
     /// refers to the index of the parent container declaration, with 'null' meaning file scope.
     parent_index: ?ExprNode.Index,
     extern_mod: ExternMod,
-    flags: Decl.Flags,
     name: []const u8,
     type_annotation: ExprNode,
+    alignment: ExprNode,
+    @"linksection": ExprNode,
     value: ExprNode,
 
     const ExternMod = union(enum)
@@ -522,12 +547,6 @@ const Decl = struct
         none,
         static,
         dyn: []const u8,
-    };
-
-    const Flags = extern struct
-    {
-        is_pub: bool,
-        is_const: bool,
     };
 };
 
@@ -543,28 +562,48 @@ pub fn deinit(self: *Generator) void
     self.arena.deinit();
 }
 
-pub fn format(self: Generator, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) @TypeOf(writer).Error!void
+pub fn render(self: *const Generator, writer: anytype) @TypeOf(writer).Error!void
 {
-    _ = self;
-    _ = fmt;
-    _ = options;
-    _ = writer;
-
     for (self.top_level_nodes.keys()) |tln|
     {
         switch (tln.tag)
         {
-            .decl,
+            .sentinel => unreachable,
+            .decl_const,
+            .decl_var,
+            .decl_pub_const,
+            .decl_pub_var,
             .usingnamespace_statement,
+            .pub_usingnamespace_statement,
             => try writer.print("{}", .{self.fmtStatementNode(tln)}),
         }
     }
+}
+
+pub fn renderFmt(self: *const Generator) std.fmt.Formatter(Generator.renderFormat)
+{
+    return .{ .data = self };
+}
+fn renderFormat(self: *const Generator, comptime fmt_str: []const u8, options: std.fmt.FormatOptions, writer: anytype) @TypeOf(writer).Error!void
+{
+    _ = fmt_str;
+    _ = options;
+    return self.render(writer);
 }
 
 fn fmtExprNode(self: *const Generator, node: ExprNode) std.fmt.Formatter(formatExprNode)
 {
     return .{
         .data = FormattableExprNode{
+            .gen = self,
+            .node = node,
+        },
+    };
+}
+fn fmtStatementNode(self: *const Generator, node: StatementNode) std.fmt.Formatter(formatStatementNode)
+{
+    return .{
+        .data = FormattableStatementNode{
             .gen = self,
             .node = node,
         },
@@ -586,7 +625,7 @@ fn formatExprNode(
     const node = fmt_node.node;
     switch (node.tag)
     {
-        .invalid => unreachable,
+        .sentinel => unreachable,
         .primitive_type => try writer.writeAll(@tagName(@intToEnum(PrimitiveType, node.index))),
         .unsigned_int_type => try writer.print("u{d}", .{@intCast(u16, node.index)}),
         .signed_int_type => try writer.print("i{d}", .{@intCast(u16, node.index)}),
@@ -636,9 +675,9 @@ fn formatExprNode(
                 .none => try writer.writeByte('.'),
                 .some => |annotations|
                 {
-                    std.debug.assert(annotations.type.tag != .invalid);
+                    std.debug.assert(annotations.type.tag != .sentinel);
                     try writer.writeByte('[');
-                    if (annotations.len.nullIfInvalid()) |len|
+                    if (annotations.len.unwrap()) |len|
                     {
                         try writer.print("{}", .{self.fmtExprNode(len)});
                     }
@@ -646,7 +685,7 @@ fn formatExprNode(
                     {
                         try writer.writeByte('_');
                     }
-                    if (annotations.sentinel.nullIfInvalid()) |s|
+                    if (annotations.sentinel.unwrap()) |s|
                     {
                         try writer.print(":{}]", .{self.fmtExprNode(s)});
                     }
@@ -739,10 +778,10 @@ fn formatExprNode(
             {
                 .C =>
                 {
-                    std.debug.assert(pointer.sentinel.tag == .invalid);
+                    std.debug.assert(pointer.sentinel.tag == .sentinel);
                     std.debug.assert(!pointer.flags.is_allowzero);
                 },
-                .One => std.debug.assert(pointer.sentinel.tag == .invalid),
+                .One => std.debug.assert(pointer.sentinel.tag == .sentinel),
                 .Many, .Slice => {},
             }
             switch (pointer.size)
@@ -750,14 +789,14 @@ fn formatExprNode(
                 .One => try writer.writeByte('*'),
                 .Many =>
                 {
-                    try if (pointer.sentinel.nullIfInvalid()) |s|
+                    try if (pointer.sentinel.unwrap()) |s|
                         writer.print("[*:{}]", .{self.fmtExprNode(s)})
                     else
                         writer.writeAll("[*]");
                 },
                 .Slice =>
                 {
-                    try if (pointer.sentinel.nullIfInvalid()) |s|
+                    try if (pointer.sentinel.unwrap()) |s|
                         writer.print("[:{}]", .{self.fmtExprNode(s)})
                     else
                         writer.writeAll("[]"); 
@@ -765,7 +804,7 @@ fn formatExprNode(
                 .C => try writer.writeAll("[*c]"),
             }
             if (pointer.flags.is_allowzero) try writer.writeAll("allowzero ");
-            if (pointer.alignment.nullIfInvalid()) |a| try writer.print("align({}) ", .{self.fmtExprNode(a)});
+            if (pointer.alignment.unwrap()) |a| try writer.print("align({}) ", .{self.fmtExprNode(a)});
             if (pointer.flags.is_const) try writer.writeAll("const ");
             if (pointer.flags.is_volatile) try writer.writeAll("volatile ");
 
@@ -785,7 +824,7 @@ fn formatExprNode(
                 .decl_ref,
                 .pointer,
                 => try writer.print("{}", .{self.fmtExprNode(pointer.child)}),
-                .invalid => unreachable,
+                .sentinel => unreachable,
 
                 .addr_sized_int_decimal => unreachable,
                 .addr_sized_int_hex => unreachable,
@@ -869,16 +908,6 @@ fn formatExprNode(
     }
 }
 
-fn fmtStatementNode(self: *const Generator, node: StatementNode) std.fmt.Formatter(formatStatementNode)
-{
-    return .{
-        .data = FormattableStatementNode{
-            .gen = self,
-            .node = node,
-        },
-    };
-}
-
 const FormattableStatementNode = struct { gen: *const Generator, node: StatementNode };
 fn formatStatementNode(
     fmt_decl: FormattableStatementNode,
@@ -894,37 +923,49 @@ fn formatStatementNode(
     const node = fmt_decl.node;
     switch (node.tag)
     {
-        .decl =>
+        .sentinel => unreachable,
+        .decl_const,
+        .decl_var,
+        .decl_pub_const,
+        .decl_pub_var,
+        =>
         {
             const decl: Decl = self.decls.get(node.index);
-            if (decl.flags.is_pub) try writer.writeAll("pub ");
-            switch (decl.extern_mod) {
-                .none =>
-                {
-                    try writer.writeAll(if (decl.flags.is_const) "const " else "var ");
-                    try writer.print("{s}", .{std.zig.fmtId(decl.name)});
-                    if (decl.type_annotation.nullIfInvalid()) |ta| try writer.print(": {}", .{self.fmtExprNode(ta)});
-                    try writer.print(" = {};\n", .{self.fmtExprNode(decl.value.nullIfInvalid().?)});
-                },
-                .static =>
-                {
-                    try writer.writeAll("extern ");
-                    try writer.writeAll(if (decl.flags.is_const) "const " else "var ");
-                    try writer.print("{s}", .{std.zig.fmtId(decl.name)});
-                    try writer.print(": {};\n", .{self.fmtExprNode(decl.type_annotation.nullIfInvalid().?)});
-                    std.debug.assert(decl.value.tag == .invalid);
-                },
-                .dyn => |lib_str|
-                {
-                    try writer.print("extern \"{s}\" ", .{lib_str});
-                    try writer.writeAll(if (decl.flags.is_const) "const " else "var ");
-                    try writer.print("{s}", .{std.zig.fmtId(decl.name)});
-                    try writer.print(": {};\n", .{self.fmtExprNode(decl.type_annotation.nullIfInvalid().?)});
-                    std.debug.assert(decl.value.tag == .invalid);
-                },
+            switch (node.tag)
+            {
+                .decl_pub_const,
+                .decl_pub_var,
+                => try writer.writeAll("pub "),
+                .decl_const,
+                .decl_var,
+                => {},
+                else => unreachable,
             }
+            switch (decl.extern_mod)
+            {
+                .none => {},
+                .static => try writer.writeAll("extern "),
+                .dyn => |lib_str| try writer.print("extern \"{s}\" ", .{lib_str})
+            }
+            switch (node.tag)
+            {
+                .decl_const,
+                .decl_pub_const,
+                => try writer.writeAll("const "),
+                .decl_var,
+                .decl_pub_var,
+                => try writer.writeAll("var "),
+                else => unreachable,
+            }
+            try writer.print("{s}", .{std.zig.fmtId(decl.name)});
+            if (decl.type_annotation.unwrap())  |ta | try writer.print(": {}",              .{self.fmtExprNode(ta)});
+            if (decl.alignment.unwrap())        |a  | try writer.print(" align({})",        .{self.fmtExprNode(a)});
+            if (decl.@"linksection".unwrap())   |ls | try writer.print(" linksection({})",  .{self.fmtExprNode(ls)});
+            if (decl.value.unwrap())            |val| try writer.print(" = {}",             .{self.fmtExprNode(val)});
+            try writer.writeAll(";\n");
         },
         .usingnamespace_statement => try writer.print("usingnamespace {};\n", .{self.fmtExprNode(self.ordered_node_set.keys()[node.index])}),
+        .pub_usingnamespace_statement => try writer.print("pub usingnamespace {};\n", .{self.fmtExprNode(self.ordered_node_set.keys()[node.index])}),
     }
 }
 
@@ -940,7 +981,7 @@ fn invalidExprNode(index_value: ExprNode.Index) ExprNode
 {
     return ExprNode{
         .index = index_value,
-        .tag = .invalid,
+        .tag = .sentinel,
     };
 }
 
@@ -1368,16 +1409,15 @@ pub fn addDecl(
 ) std.mem.Allocator.Error!ExprNode
 {
     if (type_annotation) |ta| {
-        std.debug.assert(ta.tag != .invalid);
+        std.debug.assert(ta.tag != .sentinel);
     }
-    const decl_node = try self.createDeclaration(null,
-        is_pub,
-        .none,
-        mutability,
-        name,
-        type_annotation orelse Generator.invalidExprNode(undefined),
-        value,
-    );
+    const decl_node = try self.createDeclaration(mutability, name, type_annotation, value, .{
+        .parent_index = null,
+        .is_pub = is_pub,
+        .extern_mod = .none,
+        .alignment = null,
+        .@"linksection" = null,
+    });
     errdefer {
         self.decls.shrinkRetainingCapacity(self.decls.len - 1);
         std.debug.assert(self.decls.len == decl_node.index);
@@ -1396,31 +1436,38 @@ pub fn addUsingnamespace(self: *Generator, target: ExprNode) std.mem.Allocator.E
     try self.top_level_nodes.putNoClobber(self.allocator(), usingnamespace_node, {});
 }
 
-pub fn createUsingnamespace(self: *Generator, target: ExprNode) std.mem.Allocator.Error!StatementNode
+fn createUsingnamespace(self: *Generator, is_pub: bool, target: ExprNode) std.mem.Allocator.Error!StatementNode
 {
     const gop = try self.ordered_node_set.getOrPut(self.allocator(), target);
     return StatementNode{
         .index = gop.index,
-        .tag = .usingnamespace_statement,
+        .tag = if (is_pub)
+            .pub_usingnamespace_statement
+        else
+            .usingnamespace_statement,
     };
 }
 
 fn createDeclaration(
     self: *Generator,
-    parent_index: ?ExprNode.Index,
-    is_pub: bool,
-    extern_mod: Decl.ExternMod,
     mutability: Mutability,
     name: []const u8,
-    type_annotation: ExprNode,
-    value: ExprNode,
+    type_annotation: ?ExprNode,
+    value: ?ExprNode,
+    extra: struct {
+        parent_index: ?ExprNode.Index = null,
+        is_pub: bool = false,
+        extern_mod: Decl.ExternMod = .none,
+        alignment: ?ExprNode = null,
+        @"linksection": ?ExprNode = null,
+    },
 ) std.mem.Allocator.Error!StatementNode
 {
     const duped_name = try self.dupeString(name);
 
-    const duped_extern_mod: Decl.ExternMod = switch (extern_mod)
+    const duped_extern_mod: Decl.ExternMod = switch (extra.extern_mod)
     {
-        .none, .static => extern_mod,
+        .none, .static => extra.extern_mod,
         .dyn => |str| Decl.ExternMod{
             .dyn = try self.dupeString(str),
         },
@@ -1439,17 +1486,22 @@ fn createDeclaration(
     }
 
     self.decls.set(new_index, Decl{
-        .parent_index = parent_index,
+        .parent_index = extra.parent_index,
         .extern_mod = duped_extern_mod,
-        .flags = .{ .is_pub = is_pub, .is_const = mutability == .Const },
         .name = duped_name,
-        .type_annotation = type_annotation,
-        .value = value,
+        .type_annotation = if (type_annotation) |ta| ta.unwrap().? else ExprNode.sentinel,
+        .alignment = if (extra.alignment) |a| a.unwrap().? else ExprNode.sentinel,
+        .@"linksection" = if (extra.@"linksection") |ls| ls.unwrap().? else ExprNode.sentinel,
+        .value = if (value) |val| val.unwrap().? else ExprNode.sentinel,
     });
 
     return StatementNode{
         .index = new_index,
-        .tag = .decl,
+        .tag = switch (mutability)
+        {
+            .Var => @as(StatementNode.Tag, if (extra.is_pub) .decl_pub_var else .decl_var),
+            .Const => @as(StatementNode.Tag, if (extra.is_pub) .decl_pub_const else .decl_const),
+        },
     };
 }
 
@@ -1563,38 +1615,43 @@ test "node printing behavior"
         .flags = .{ .is_allowzero = true, .is_const = true, .is_volatile = true },
     }));
 
-    try gen.expectNodeFmt(
-        "const foo = 3;\n",
-        try gen.createDeclaration(null, false, .none, .Const, "foo", Generator.invalidExprNode(undefined), try gen.createIntLiteral(.decimal, 3)),
-    );
-    try gen.expectNodeFmt(
-        "pub const foo = 3;\n",
-        try gen.createDeclaration(null, true, .none, .Const, "foo", Generator.invalidExprNode(undefined), try gen.createIntLiteral(.decimal, 3)),
-    );
-    try gen.expectNodeFmt(
-        "pub const foo = 3;\n",
-        try gen.createDeclaration(null, true, .none, .Const, "foo", Generator.invalidExprNode(undefined), try gen.createIntLiteral(.decimal, 3)),
-    );
-    try gen.expectNodeFmt(
-        "pub const foo: u32 = 3;\n",
-        try gen.createDeclaration(null, true, .none, .Const, "foo", u32_type, try gen.createIntLiteral(.decimal, 3)),
-    );
-    try gen.expectNodeFmt(
-        "pub var foo: u32 = 3;\n",
-        try gen.createDeclaration(null, true, .none, .Var, "foo", u32_type, try gen.createIntLiteral(.decimal, 3)),
-    );
-    try gen.expectNodeFmt(
-        "pub extern var foo: u32;\n",
-        try gen.createDeclaration(null, true, .static, .Var, "foo", u32_type, Generator.invalidExprNode(undefined)),
-    );
-    try gen.expectNodeFmt(
-        "pub extern \"fbb\" const foo: u32;\n",
-        try gen.createDeclaration(null, true, .{ .dyn = "fbb" }, .Const, "foo", u32_type, Generator.invalidExprNode(undefined)),
-    );
+    try gen.expectNodeFmt("const foo = 3;\n", try gen.createDeclaration(.Const, "foo", null, try gen.createIntLiteral(.decimal, 3), .{}));
+    try gen.expectNodeFmt("pub const foo = 3;\n", try gen.createDeclaration(.Const, "foo", null, try gen.createIntLiteral(.decimal, 3), .{
+        .is_pub = true,
+    }));
+    try gen.expectNodeFmt("pub const foo: u32 = 3;\n", try gen.createDeclaration(.Const, "foo", u32_type, try gen.createIntLiteral(.decimal, 3), .{
+        .is_pub = true,
+    }));
+    try gen.expectNodeFmt("pub var foo: u32 = 3;\n", try gen.createDeclaration(.Var, "foo", u32_type, try gen.createIntLiteral(.decimal, 3), .{
+        .is_pub = true,
+    }));
+    try gen.expectNodeFmt("pub extern var foo: u32;\n", try gen.createDeclaration(.Var, "foo", u32_type, null, .{
+        .is_pub = true,
+        .extern_mod = .static,
+    }));
+    try gen.expectNodeFmt("pub extern \"fbb\" const foo: u32;\n", try gen.createDeclaration(.Const, "foo", u32_type, null, .{
+        .is_pub = true,
+        .extern_mod = .{ .dyn = "fbb" },
+    }));
+    try gen.expectNodeFmt("pub extern \"fbb\" const foo: u32 align(64);\n", try gen.createDeclaration(.Const, "foo", u32_type, null, .{
+        .is_pub = true,
+        .extern_mod = .{ .dyn = "fbb" },
+        .alignment = try gen.createIntLiteral(.decimal, 64),
+    }));
+    try gen.expectNodeFmt("pub extern \"fbb\" const foo: u32 align(64) linksection(\"bar\");\n", try gen.createDeclaration(.Const, "foo", u32_type, null, .{
+        .is_pub = true,
+        .extern_mod = .{ .dyn = "fbb" },
+        .alignment = try gen.createIntLiteral(.decimal, 64),
+        .@"linksection" = try gen.createStringLiteral("bar"),
+    }));
 
     try gen.expectNodeFmt(
         "usingnamespace @import(\"std\");\n",
-        try gen.createUsingnamespace(try gen.createBuiltinCall(.import, &.{ try gen.createStringLiteral("std") })),
+        try gen.createUsingnamespace(false, try gen.createBuiltinCall(.import, &.{try gen.createStringLiteral("std")})),
+    );
+    try gen.expectNodeFmt(
+        "pub usingnamespace @import(\"std\");\n",
+        try gen.createUsingnamespace(true, try gen.createBuiltinCall(.import, &.{try gen.createStringLiteral("std")})),
     );
 }
 
@@ -1623,5 +1680,5 @@ test "top level decls"
         \\pub const p_bar: *u32 = &bar;
         \\pub const empty_str: String = .{};
         \\
-    , "{}", .{gen});
+    , "{}", .{gen.renderFmt()});
 }
