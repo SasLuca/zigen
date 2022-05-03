@@ -15,7 +15,7 @@ prefix_ops: ExternStructArraySet(PrefixOp) = .{},
 bin_ops: std.ArrayListUnmanaged(BinOp) = .{},
 postfix_ops: ExternStructArraySet(PostfixOp) = .{},
 builtin_calls: BuiltinCallSet = .{},
-function_calls: std.ArrayListUnmanaged(FunctionCall) = .{},
+function_calls: FunctionCallSet = .{},
 pointers: std.MultiArrayList(Pointer) = .{},
 dot_accesses: std.ArrayListUnmanaged(DotAccess) = .{},
 
@@ -127,6 +127,35 @@ const BuiltinCallSet = std.ArrayHashMapUnmanaged(
             _ = ctx;
             _ = b_index;
             return a.name == b.name and for (a.params) |param_a, i|
+            {
+                const param_b = b.params[i];
+                if (!std.meta.eql(param_a, param_b)) break false;
+            } else true;
+        }
+    },
+    true,
+);
+const FunctionCallSet = std.ArrayHashMapUnmanaged(
+    FunctionCall,
+    void,
+    struct
+    {
+        pub fn hash(ctx: @This(), fcall: FunctionCall) u32
+        {
+            _ = ctx;
+            var hasher = std.hash.Wyhash.init(0);
+            std.hash.autoHash(&hasher, fcall.callable);
+            for (fcall.params) |param|
+            {
+                std.hash.autoHash(&hasher, param);
+            }
+            return @truncate(u32, hasher.final());
+        }
+        pub fn eql(ctx: @This(), a: FunctionCall, b: FunctionCall, b_index: usize) bool
+        {
+            _ = ctx;
+            _ = b_index;
+            return std.meta.eql(a.callable, b.callable) and for (a.params) |param_a, i|
             {
                 const param_b = b.params[i];
                 if (!std.meta.eql(param_a, param_b)) break false;
@@ -747,7 +776,7 @@ fn formatExprNode(
         },
         .function_call =>
         {
-            const function_call: FunctionCall = self.function_calls.items[node.index];
+            const function_call: FunctionCall = self.function_calls.keys()[node.index];
             const params: []const ExprNode = function_call.params;
 
             try writer.print("{}(", .{self.fmtExprNode(function_call.callable)});
@@ -1281,7 +1310,7 @@ pub fn createBuiltinCall(self: *Generator, builtin_name: BuiltinFnName, params: 
     {
         gop.key_ptr.params = self.dupeExprNodeList(params) catch |err| {
             const popped = self.builtin_calls.pop();
-            if (comptime std.debug.runtime_safety)
+            if (comptime @import("builtin").mode == .Debug)
             {
                 std.debug.assert(popped.key.name == builtin_name and for (popped.key.params) |param, i|
                 {
@@ -1300,17 +1329,36 @@ pub fn createBuiltinCall(self: *Generator, builtin_name: BuiltinFnName, params: 
 
 pub fn createFunctionCall(self: *Generator, callable: ExprNode, params: []const ExprNode) std.mem.Allocator.Error!ExprNode
 {
-    const new_index = self.function_calls.items.len;
-    const new = try self.function_calls.addOne(self.allocator());
-    errdefer _ = self.function_calls.pop();
+    // const new_index = self.function_calls.items.len;
+    // const new = try self.function_calls.addOne(self.allocator());
+    // errdefer _ = self.function_calls.pop();
 
-    new.* = .{
+    // new.* = .{
+    //     .callable = callable,
+    //     .params = try self.dupeExprNodeList(params),
+    // };
+
+    const gop = try self.function_calls.getOrPut(self.allocator(), FunctionCall{
         .callable = callable,
-        .params = try self.dupeExprNodeList(params),
-    };
+        .params = params,
+    });
+    if (!gop.found_existing)
+    {
+        gop.key_ptr.params = self.dupeExprNodeList(params) catch |err| {
+            const popped = self.function_calls.pop();
+            if (comptime @import("builtin").mode == .Debug)
+            {
+                std.debug.assert(std.meta.eql(popped.key.callable, callable) and for (popped.key.params) |param, i|
+                {
+                    if (!std.meta.eql(param, params[i])) break false;
+                } else true);
+            }
+            return err;
+        };
+    }
 
     return ExprNode{
-        .index = new_index,
+        .index = gop.index,
         .tag = .function_call,
     };
 }
