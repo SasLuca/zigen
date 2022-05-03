@@ -2,25 +2,21 @@ const std = @import("std");
 
 const Generator = @This();
 arena: std.heap.ArenaAllocator,
-top_level_nodes: StatementNodeSet = .{},
+top_level_nodes: ExternStructArraySet(StatementNode) = .{},
+decls: std.MultiArrayList(Decl) = .{},
 
-raw_code_literals: std.StringArrayHashMapUnmanaged(void) = .{},
-big_int_literals: ExternStructArraySet(BigIntRange) = .{},
-char_literals: std.StringArrayHashMapUnmanaged(void) = .{},
-string_literals: std.StringArrayHashMapUnmanaged(void) = .{},
+ordered_string_set: std.StringArrayHashMapUnmanaged(void) = .{},
+ordered_node_set: ExternStructArraySet(ExprNode) = .{},
+
+big_int_literals: ExternStructArraySet(BigIntLimbsRange) = .{},
 list_inits: std.ArrayListUnmanaged(ListInit) = .{},
 prefix_ops: ExternStructArraySet(PrefixOp) = .{},
 bin_ops: std.ArrayListUnmanaged(BinOp) = .{},
 postfix_ops: ExternStructArraySet(PostfixOp) = .{},
 builtin_calls: std.ArrayListUnmanaged(BuiltinCall) = .{},
 function_calls: std.ArrayListUnmanaged(FunctionCall) = .{},
-optionals: ExprNodeSet = .{},
 pointers: std.MultiArrayList(Pointer) = .{},
-parentheses_expressions: ExprNodeSet = .{},
 dot_accesses: std.ArrayListUnmanaged(DotAccess) = .{},
-
-decls: std.MultiArrayList(Decl) = .{},
-usingnamespace_statements: ExprNodeSet = .{},
 
 /// string set to avoid duplicating the same string multiple times.
 string_set: StringSet = .{},
@@ -61,8 +57,6 @@ fn ExternStructArraySet(comptime T: type) type {
     };
     return std.ArrayHashMapUnmanaged(T, void, Context, false);
 }
-const ExprNodeSet = ExternStructArraySet(ExprNode);
-const StatementNodeSet = ExternStructArraySet(StatementNode);
 
 pub const StatementNode = extern struct
 {
@@ -75,7 +69,7 @@ pub const StatementNode = extern struct
     {
         /// index into field `Generator.decls`.
         decl,
-        /// index into field `Generator.usingnamespace_statements`.
+        /// index into field `Generator.ordered_node_set`.
         usingnamespace_statement,
     };
 };
@@ -117,11 +111,11 @@ pub const ExprNode = extern struct
         /// index into field `Generator.big_int_literals`.
         big_int_literal_binary,
 
-        /// index into field `Generator.raw_code_literals`.
+        /// index into field `Generator.ordered_string_set`.
         raw_code_literal,
-        /// index into field `Generator.char_literals`.
+        /// index into field `Generator.ordered_string_set`.
         char_literal,
-        /// index into field `Generator.string_literals`.
+        /// index into field `Generator.ordered_string_set`.
         string_literal,
         /// index into field `Generator.list_inits`.
         list_init,
@@ -135,11 +129,11 @@ pub const ExprNode = extern struct
         builtin_call,
         /// index into field `Generator.function_calls`.
         function_call,
-        /// index into field `Generator.optionals`.
+        /// index into field `Generator.ordered_node_set`.
         optional,
         /// index into field `Generator.pointers`.
         pointer,
-        /// index into field `Generator.parentheses_expressions`.
+        /// index into field `Generator.ordered_node_set`.
         parentheses_expression,
         /// index into field `Generator.dot_accesses`.
         dot_access,
@@ -184,7 +178,7 @@ const PrimitiveValue = enum(ExprNode.Index)
     @"undefined",
 };
 
-const BigIntRange = extern struct
+const BigIntLimbsRange = extern struct
 {
     /// start of range in field `Generator.contiguous_big_int_limbs_store`.
     limbs_start: usize,
@@ -421,7 +415,7 @@ fn formatExprNode(
         .big_int_literal_binary,
         =>
         {
-            const range: BigIntRange = self.big_int_literals.keys()[node.index];
+            const range: BigIntLimbsRange = self.big_int_literals.keys()[node.index];
             const limbs = self.contiguous_big_int_limbs_store.items[range.limbs_start..range.limbs_end];
             const big_int = std.math.big.int.Const{
                 .limbs = limbs,
@@ -444,9 +438,9 @@ fn formatExprNode(
             try writer.print("{s}", .{str});
         },
 
-        .raw_code_literal => try writer.writeAll(self.raw_code_literals.keys()[node.index]),
-        .char_literal => try writer.print("'{s}'", .{self.char_literals.keys()[node.index]}),
-        .string_literal => try writer.print("\"{s}\"", .{self.string_literals.keys()[node.index]}),
+        .raw_code_literal => try writer.writeAll(self.ordered_string_set.keys()[node.index]),
+        .char_literal => try writer.print("'{s}'", .{self.ordered_string_set.keys()[node.index]}),
+        .string_literal => try writer.print("\"{s}\"", .{self.ordered_string_set.keys()[node.index]}),
         .list_init =>
         {
             const list_init: ListInit = self.list_inits.items[node.index];
@@ -541,7 +535,7 @@ fn formatExprNode(
             }
             try writer.writeByte(')');
         },
-        .optional => try writer.print("?{}", .{self.fmtExprNode(self.optionals.keys()[node.index])}),
+        .optional => try writer.print("?{}", .{self.fmtExprNode(self.ordered_node_set.keys()[node.index])}),
         .pointer =>
         {
             const slice = self.pointers.slice();
@@ -623,7 +617,7 @@ fn formatExprNode(
                 .prefix_op => unreachable,
             }
         },
-        .parentheses_expression => try writer.print("({})", .{self.fmtExprNode(self.parentheses_expressions.keys()[node.index])}),
+        .parentheses_expression => try writer.print("({})", .{self.fmtExprNode(self.ordered_node_set.keys()[node.index])}),
         .dot_access =>
         {
             const dot_access: DotAccess = self.dot_accesses.items[node.index];
@@ -743,7 +737,7 @@ fn formatStatementNode(
                 },
             }
         },
-        .usingnamespace_statement => try writer.print("usingnamespace {};\n", .{self.fmtExprNode(self.usingnamespace_statements.keys()[node.index])}),
+        .usingnamespace_statement => try writer.print("usingnamespace {};\n", .{self.fmtExprNode(self.ordered_node_set.keys()[node.index])}),
     }
 }
 
@@ -856,7 +850,7 @@ pub fn createBigIntLiteral(self: *Generator, radix: IntLiteralRadix, big_int: st
     if (std.mem.indexOf(std.math.big.Limb, self.contiguous_big_int_limbs_store.items, big_int.limbs)) |limbs_start|
     {
         return ExprNode{
-            .index = self.big_int_literals.getIndex(BigIntRange{
+            .index = self.big_int_literals.getIndex(BigIntLimbsRange{
                 .limbs_start = limbs_start,
                 .limbs_end = limbs_start + big_int.limbs.len,
             }).?,
@@ -876,7 +870,7 @@ pub fn createBigIntLiteral(self: *Generator, radix: IntLiteralRadix, big_int: st
     const limbs_end = self.contiguous_big_int_limbs_store.items.len;
     errdefer self.contiguous_big_int_limbs_store.shrinkRetainingCapacity(limbs_start);
 
-    const gop = try self.big_int_literals.getOrPut(self.allocator(), BigIntRange{
+    const gop = try self.big_int_literals.getOrPut(self.allocator(), BigIntLimbsRange{
         .limbs_start = limbs_start,
         .limbs_end = limbs_end,
     });
@@ -948,12 +942,12 @@ pub fn createListInit(
 
 pub fn createRawCode(self: *Generator, literal_str: []const u8) std.mem.Allocator.Error!ExprNode
 {
-    const gop = try self.raw_code_literals.getOrPut(self.allocator(), literal_str);
+    const gop = try self.ordered_string_set.getOrPut(self.allocator(), literal_str);
     if (!gop.found_existing)
     {
         gop.key_ptr.* = self.dupeString(literal_str) catch |err|
         {
-            const popped_str = self.raw_code_literals.pop().key;
+            const popped_str = self.ordered_string_set.pop().key;
             if (@import("builtin").mode == .Debug)
             {
                 std.debug.assert(std.mem.eql(u8, popped_str, literal_str));
@@ -1011,7 +1005,7 @@ pub fn createCharLiteral(self: *Generator, char_literal_content: []const u8) (st
     }
 
     const duped_char_literal_content = try self.dupeString(char_literal_content);
-    const gop = try self.char_literals.getOrPut(self.allocator(), duped_char_literal_content);
+    const gop = try self.ordered_string_set.getOrPut(self.allocator(), duped_char_literal_content);
     return ExprNode{
         .index = gop.index,
         .tag = .char_literal,
@@ -1021,7 +1015,7 @@ pub fn createCharLiteral(self: *Generator, char_literal_content: []const u8) (st
 pub fn createStringLiteral(self: *Generator, content: []const u8) std.mem.Allocator.Error!ExprNode
 {
     const duped_content = try self.dupeString(content);
-    const gop = try self.string_literals.getOrPut(self.allocator(), duped_content);
+    const gop = try self.ordered_string_set.getOrPut(self.allocator(), duped_content);
     return ExprNode{
         .index = gop.index,
         .tag = .string_literal,
@@ -1120,7 +1114,7 @@ pub fn createFunctionCall(self: *Generator, callable: ExprNode, params: []const 
 
 pub fn createOptionalType(self: *Generator, node: ExprNode) std.mem.Allocator.Error!ExprNode
 {
-    const gop = try self.optionals.getOrPut(self.allocator(), node);
+    const gop = try self.ordered_node_set.getOrPut(self.allocator(), node);
     return ExprNode{
         .index = gop.index,
         .tag = .optional,
@@ -1158,7 +1152,7 @@ pub fn createPointerType(
 
 pub fn createParenthesesExpression(self: *Generator, node: ExprNode) std.mem.Allocator.Error!ExprNode
 {
-    const gop = try self.parentheses_expressions.getOrPut(self.allocator(), node);
+    const gop = try self.ordered_node_set.getOrPut(self.allocator(), node);
     return ExprNode{
         .index = gop.index,
         .tag = .parentheses_expression,
@@ -1171,8 +1165,8 @@ pub fn createDotAccess(self: *Generator, lhs: ExprNode, rhs: []const []const u8)
     const new_dot_access = try self.dot_accesses.addOne(self.allocator());
     errdefer _ = self.dot_accesses.pop();
 
-    var strings = try std.ArrayList([]const u8).initCapacity(self.allocator(), rhs.len);
-    errdefer strings.deinit();
+    var ordered_string_set = try std.ArrayList([]const u8).initCapacity(self.allocator(), rhs.len);
+    errdefer ordered_string_set.deinit();
 
     var linear_str = std.ArrayList(u8).init(self.allocator());
     errdefer linear_str.deinit();
@@ -1187,12 +1181,12 @@ pub fn createDotAccess(self: *Generator, lhs: ExprNode, rhs: []const []const u8)
         const start = linear_str.items.len;
         linear_str.appendSliceAssumeCapacity(str);
         const end = linear_str.items.len;
-        strings.appendAssumeCapacity(linear_str.items[start..end]);
+        ordered_string_set.appendAssumeCapacity(linear_str.items[start..end]);
     }
 
     new_dot_access.* = .{
         .lhs = lhs,
-        .rhs = strings.toOwnedSlice(),
+        .rhs = ordered_string_set.toOwnedSlice(),
     };
     return ExprNode{
         .index = new_index,
@@ -1236,13 +1230,12 @@ pub fn addDecl(
 pub fn addUsingnamespace(self: *Generator, target: ExprNode) std.mem.Allocator.Error!void
 {
     const usingnamespace_node = try self.createUsingnamespace(target);
-    errdefer _ = self.usingnamespace_statements.pop();
     try self.top_level_nodes.putNoClobber(self.allocator(), usingnamespace_node, {});
 }
 
 pub fn createUsingnamespace(self: *Generator, target: ExprNode) std.mem.Allocator.Error!StatementNode
 {
-    const gop = try self.usingnamespace_statements.getOrPut(self.allocator(), target);
+    const gop = try self.ordered_node_set.getOrPut(self.allocator(), target);
     return StatementNode{
         .index = gop.index,
         .tag = .usingnamespace_statement,
