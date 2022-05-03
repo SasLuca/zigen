@@ -8,7 +8,7 @@ decls: std.MultiArrayList(Decl) = .{},
 ordered_string_set: std.StringArrayHashMapUnmanaged(void) = .{},
 ordered_node_set: ExternStructArraySet(ExprNode) = .{},
 
-big_int_literals: ExternStructArraySet(BigIntLimbsRange) = .{},
+big_int_literals: BigIntSet = .{},
 list_inits: std.ArrayListUnmanaged(ListInit) = .{},
 prefix_ops: ExternStructArraySet(PrefixOp) = .{},
 bin_ops: std.ArrayListUnmanaged(BinOp) = .{},
@@ -22,8 +22,6 @@ dot_accesses: std.ArrayListUnmanaged(DotAccess) = .{},
 string_set: StringSet = .{},
 /// referenced by `Generator.builtin_calls`, `Generator.function_calls`, and `Generator.list_inits`.
 contiguous_node_list_store: std.ArrayListUnmanaged(ExprNode) = .{},
-/// referenced by `Generator.big_int_literals`.
-contiguous_big_int_limbs_store: std.ArrayListUnmanaged(std.math.big.Limb) = .{},
 /// used during formatting for anything requring allocation,
 /// grown during function calls that create things that would require
 /// such scratch space.
@@ -41,6 +39,31 @@ fn dupeString(self: *Generator, str: []const u8) std.mem.Allocator.Error![]const
     }
     return gop.key_ptr.*;
 }
+
+const BigIntSet = std.ArrayHashMapUnmanaged(
+    []const std.math.big.Limb,
+    void,
+    struct
+    {
+        pub fn hash(ctx: @This(), limbs: []const std.math.big.Limb) u32
+        {
+            _ = ctx;
+            var hasher = std.hash.Wyhash.init(0);
+            for (limbs) |*limb|
+            {
+                hasher.update(std.mem.asBytes(limb));
+            }
+            return @truncate(u32, hasher.final());
+        }
+        pub fn eql(ctx: @This(), a: []const std.math.big.Limb, b: []const std.math.big.Limb, b_index: usize) bool
+        {
+            _ = ctx;
+            _ = b_index;
+            return std.mem.eql(std.math.big.Limb, a, b);
+        }
+    },
+    true,
+);
 
 fn ExternStructArraySet(comptime T: type) type {
     const Context = struct
@@ -176,14 +199,6 @@ const PrimitiveValue = enum(ExprNode.Index)
     @"false",
     @"null",
     @"undefined",
-};
-
-const BigIntLimbsRange = extern struct
-{
-    /// start of range in field `Generator.contiguous_big_int_limbs_store`.
-    limbs_start: usize,
-    /// end of range in field `Generator.contiguous_big_int_limbs_store`.
-    limbs_end: usize,
 };
 
 const ListInit = struct
@@ -415,8 +430,7 @@ fn formatExprNode(
         .big_int_literal_binary,
         =>
         {
-            const range: BigIntLimbsRange = self.big_int_literals.keys()[node.index];
-            const limbs = self.contiguous_big_int_limbs_store.items[range.limbs_start..range.limbs_end];
+            const limbs: []const std.math.big.Limb = self.big_int_literals.keys()[node.index];
             const big_int = std.math.big.int.Const{
                 .limbs = limbs,
                 .positive = true,
@@ -847,47 +861,39 @@ pub fn createBigIntLiteral(self: *Generator, radix: IntLiteralRadix, big_int: st
         .binary => 2,
     };
 
-    if (std.mem.indexOf(std.math.big.Limb, self.contiguous_big_int_limbs_store.items, big_int.limbs)) |limbs_start|
+    const gop = try self.big_int_literals.getOrPut(self.allocator(), big_int.limbs);
+    errdefer {
+        if (!gop.found_existing)
+        {
+            const popped = self.big_int_literals.pop();
+            if (comptime std.debug.runtime_safety)
+            {
+                std.debug.assert(std.mem.eql(std.math.big.Limb, gop.key_ptr.*, popped.key));
+            }
+        }
+    }
+    if (gop.found_existing)
     {
         return ExprNode{
-            .index = self.big_int_literals.getIndex(BigIntLimbsRange{
-                .limbs_start = limbs_start,
-                .limbs_end = limbs_start + big_int.limbs.len,
-            }).?,
+            .index = gop.index,
             .tag = tag,
         };
     }
 
-    try self.scratch_space.ensureUnusedCapacity(
+    try self.scratch_space.ensureTotalCapacity(
         self.allocator(),
         big_int.sizeInBaseUpperBound(base) +
             std.math.big.int.calcToStringLimbsBufferLen(big_int.limbs.len, base) * @sizeOf(std.math.big.Limb),
     );
     self.scratch_space.expandToCapacity();
 
-    const limbs_start = self.contiguous_big_int_limbs_store.items.len;
-    try self.contiguous_big_int_limbs_store.appendSlice(self.allocator(), big_int.limbs);
-    const limbs_end = self.contiguous_big_int_limbs_store.items.len;
-    errdefer self.contiguous_big_int_limbs_store.shrinkRetainingCapacity(limbs_start);
-
-    const gop = try self.big_int_literals.getOrPut(self.allocator(), BigIntLimbsRange{
-        .limbs_start = limbs_start,
-        .limbs_end = limbs_end,
-    });
-    errdefer _ = self.big_int_literals.pop();
-    std.debug.assert(!gop.found_existing);
+    gop.key_ptr.* = try self.allocator().dupe(std.math.big.Limb, big_int.limbs);
+    errdefer unreachable; // please don't error after this point, I can't figure out how to structure this without wasting/leaking memory other than this.
 
     return ExprNode{
         .index = gop.index,
         .tag = tag,
     };
-}
-fn removeLatestBigIntLiteral(self: *Generator) void
-{
-    const range = self.big_int_literals.pop();
-    std.debug.assert(range.limbs_end == self.contiguous_big_int_limbs_store.items.len);
-    std.debug.assert(range.limbs_start < range.limbs_end);
-    self.contiguous_big_int_limbs_store.shrinkRetainingCapacity(range.limbs_start);
 }
 pub fn createIntLiteral(self: *Generator, radix: IntLiteralRadix, value: anytype) std.mem.Allocator.Error!ExprNode
 {
@@ -904,7 +910,6 @@ pub fn createIntLiteral(self: *Generator, radix: IntLiteralRadix, value: anytype
             defer big_int.deinit();
 
             const literal = try self.createBigIntLiteral(radix, big_int.toConst());
-            errdefer self.removeLatestBigIntLiteral();
 
             return if (value < 0) try self.createPrefixOp(.@"-", literal) else literal;
         },
@@ -1315,7 +1320,6 @@ fn expectNodeFmt(gen: *Generator, expected: []const u8, node: anytype) !void
 
 test "node printing behavior"
 {
-    _ = createBigIntLiteral;
     const allocator = std.testing.allocator;
 
     var gen = Generator.init(allocator);
