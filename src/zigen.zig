@@ -1788,8 +1788,6 @@ test "top level decls"
     _ = try gen.addDecl(true, .Const, "empty_str", string_type_decl, try gen.createListInit(.none, &.{}));
     _ = try gen.addDecl(true, .Const, "Error", Generator.primType(type), try gen.createErrorSet(&.{ "OutOfMemory" }));
 
-    std.debug.print("\n\n{}\n", .{gen.error_sets_set.count()});
-
     try std.testing.expectFmt(
         \\const std = @import("std");
         \\const ArrayListUnmanaged = std.ArrayListUnmanaged;
