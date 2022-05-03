@@ -19,6 +19,8 @@ function_calls: FunctionCallSet = .{},
 pointers: std.MultiArrayList(Pointer) = .{},
 dot_accesses: std.ArrayListUnmanaged(DotAccess) = .{},
 
+error_sets_set: ErrorSetsSet = .{},
+
 /// string set to avoid duplicating the same string multiple times.
 string_set: StringSet = .{},
 /// referenced by `Generator.builtin_calls`, `Generator.function_calls`, and `Generator.list_inits`.
@@ -164,6 +166,36 @@ const FunctionCallSet = std.ArrayHashMapUnmanaged(
     },
     true,
 );
+const ErrorSetsSet = std.ArrayHashMapUnmanaged(
+    []const []const u8,
+    void,
+    struct
+    {
+        pub fn hash(ctx: @This(), names: []const []const u8) u32
+        {
+            _ = ctx;
+            var hasher = std.hash.Wyhash.init(0);
+            for (names) |name|
+            {
+                hasher.update(std.mem.asBytes(&name.len));
+                hasher.update(std.mem.asBytes(&name.ptr));
+            }
+            return @truncate(u32, hasher.final());
+        }
+        pub fn eql(ctx: @This(), a: []const []const u8, b: []const []const u8, b_index: usize) bool
+        {
+            _ = ctx;
+            _ = b_index;
+            for (a) |name_a, i|
+            {
+                const name_b = b[i];
+                if (name_a.len != name_b.len or name_a.ptr != name_b.ptr) return false;
+            }
+            return true;
+        }
+    },
+    true,
+);
 fn ExternStructArraySet(comptime T: type) type {
     const Context = struct
     {
@@ -280,6 +312,9 @@ pub const ExprNode = extern struct
         dot_access,
         /// index into field `Generator.decls`.
         decl_ref,
+
+        /// index into field `Generator.error_sets_set`.
+        error_set,
     };
 
     fn unwrap(self: ExprNode) ?ExprNode
@@ -852,7 +887,9 @@ fn formatExprNode(
                 .dot_access,
                 .decl_ref,
                 .pointer,
+                .error_set,
                 => try writer.print("{}", .{self.fmtExprNode(pointer.child)}),
+
                 .sentinel => unreachable,
 
                 .addr_sized_int_decimal => unreachable,
@@ -933,6 +970,28 @@ fn formatExprNode(
                 }
             }
             try writer.print("{s}", .{std.zig.fmtId(names[node.index])});
+        },
+
+        .error_set =>
+        {
+            const set: []const []const u8 = self.error_sets_set.keys()[node.index];
+            try writer.writeAll("error{");
+            switch (set.len)
+            {
+                0 => {},
+                1 => try writer.print("{s}", .{std.zig.fmtId(set[0])}),
+                2 => try writer.print(" {s}, {s} ", .{ std.zig.fmtId(set[0]), std.zig.fmtId(set[1]) }),
+                3 => try writer.print(" {s}, {s}, {s} ", .{ std.zig.fmtId(set[0]), std.zig.fmtId(set[1]), std.zig.fmtId(set[2]) }),
+                else =>
+                {
+                    try writer.writeByte('\n');
+                    for (set) |name|
+                    {
+                        try writer.print("    {s},", .{std.zig.fmtId(name)});
+                    }
+                },
+            }
+            try writer.writeAll("}");
         },
     }
 }
@@ -1475,6 +1534,19 @@ pub fn addUsingnamespace(self: *Generator, target: ExprNode) std.mem.Allocator.E
     try self.top_level_nodes.putNoClobber(self.allocator(), usingnamespace_node, {});
 }
 
+pub fn createErrorSet(self: *Generator, names: []const []const u8) std.mem.Allocator.Error!ExprNode
+{
+    const names_duped = try self.allocator().alloc([]const u8, names.len);
+    errdefer self.allocator().free(names_duped);
+    
+    for (names_duped) |*name, i| name.* = try self.dupeString(names[i]);
+    const gop = try self.error_sets_set.getOrPut(self.allocator(), names_duped);
+    return ExprNode{
+        .index = gop.index,
+        .tag = .error_set,
+    };
+}
+
 fn createUsingnamespace(self: *Generator, is_pub: bool, target: ExprNode) std.mem.Allocator.Error!StatementNode
 {
     const gop = try self.ordered_node_set.getOrPut(self.allocator(), target);
@@ -1654,6 +1726,11 @@ test "node printing behavior"
         .flags = .{ .is_allowzero = true, .is_const = true, .is_volatile = true },
     }));
 
+    try gen.expectNodeFmt("error{}", try gen.createErrorSet(&.{}));
+    try gen.expectNodeFmt("error{Foo}", try gen.createErrorSet(&.{"Foo"}));
+    try gen.expectNodeFmt("error{ Foo, Bar }", try gen.createErrorSet(&.{ "Foo", "Bar" }));
+    try gen.expectNodeFmt("error{ Foo, Bar, Baz }", try gen.createErrorSet(&.{ "Foo", "Bar", "Baz" }));
+
     try gen.expectNodeFmt("const foo = 3;\n", try gen.createDeclaration(.Const, "foo", null, try gen.createIntLiteral(.decimal, 3), .{}));
     try gen.expectNodeFmt("pub const foo = 3;\n", try gen.createDeclaration(.Const, "foo", null, try gen.createIntLiteral(.decimal, 3), .{
         .is_pub = true,
@@ -1709,6 +1786,9 @@ test "top level decls"
     const bar_decl = try gen.addDecl(false, .Var, "bar", Generator.intType(u32), foo_decl);
     _ = try gen.addDecl(true, .Const, "p_bar", try gen.createPointerType(.One, Generator.intType(u32), .{}), try gen.createPrefixOp(.@"&", bar_decl));
     _ = try gen.addDecl(true, .Const, "empty_str", string_type_decl, try gen.createListInit(.none, &.{}));
+    _ = try gen.addDecl(true, .Const, "Error", Generator.primType(type), try gen.createErrorSet(&.{ "OutOfMemory" }));
+
+    std.debug.print("\n\n{}\n", .{gen.error_sets_set.count()});
 
     try std.testing.expectFmt(
         \\const std = @import("std");
@@ -1718,6 +1798,7 @@ test "top level decls"
         \\var bar: u32 = foo;
         \\pub const p_bar: *u32 = &bar;
         \\pub const empty_str: String = .{};
+        \\pub const Error: type = error{OutOfMemory};
         \\
     , "{}", .{gen.renderFmt()});
 }
