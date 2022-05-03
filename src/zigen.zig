@@ -13,7 +13,7 @@ list_inits: std.ArrayListUnmanaged(ListInit) = .{},
 prefix_ops: ExternStructArraySet(PrefixOp) = .{},
 bin_ops: std.ArrayListUnmanaged(BinOp) = .{},
 postfix_ops: ExternStructArraySet(PostfixOp) = .{},
-builtin_calls: std.ArrayListUnmanaged(BuiltinCall) = .{},
+builtin_calls: BuiltinCallSet = .{},
 function_calls: std.ArrayListUnmanaged(FunctionCall) = .{},
 pointers: std.MultiArrayList(Pointer) = .{},
 dot_accesses: std.ArrayListUnmanaged(DotAccess) = .{},
@@ -21,17 +21,17 @@ dot_accesses: std.ArrayListUnmanaged(DotAccess) = .{},
 /// string set to avoid duplicating the same string multiple times.
 string_set: StringSet = .{},
 /// referenced by `Generator.builtin_calls`, `Generator.function_calls`, and `Generator.list_inits`.
-contiguous_node_list_store: std.ArrayListUnmanaged(ExprNode) = .{},
+node_list_set: ExprNodeListSet = .{},
 /// used during formatting for anything requring allocation,
 /// grown during function calls that create things that would require
 /// such scratch space.
 scratch_space: std.ArrayListUnmanaged(u8) = .{},
 
-const StringSet = std.StringHashMapUnmanaged(void);
 fn dupeString(self: *Generator, str: []const u8) std.mem.Allocator.Error![]const u8
 {
     const gop = try self.string_set.getOrPut(self.allocator(), str);
-    if (!gop.found_existing) {
+    if (!gop.found_existing)
+    {
         gop.key_ptr.* = self.allocator().dupe(u8, str) catch |err| {
             std.debug.assert(self.string_set.remove(str));
             return err;
@@ -39,7 +39,20 @@ fn dupeString(self: *Generator, str: []const u8) std.mem.Allocator.Error![]const
     }
     return gop.key_ptr.*;
 }
+fn dupeExprNodeList(self: *Generator, node_list: []const ExprNode) std.mem.Allocator.Error![]const ExprNode
+{
+    const gop = try self.node_list_set.getOrPut(self.allocator(), node_list);
+    if (!gop.found_existing)
+    {
+        gop.key_ptr.* = self.allocator().dupe(ExprNode, node_list) catch |err| {
+            std.debug.assert(self.node_list_set.remove(node_list));
+            return err;
+        };
+    }
+    return gop.key_ptr.*;
+}
 
+const StringSet = std.StringHashMapUnmanaged(void);
 const BigIntSet = std.ArrayHashMapUnmanaged(
     []const std.math.big.Limb,
     void,
@@ -64,7 +77,63 @@ const BigIntSet = std.ArrayHashMapUnmanaged(
     },
     true,
 );
-
+const ExprNodeListSet = std.HashMapUnmanaged(
+    []const ExprNode,
+    void,
+    struct
+    {
+        pub fn hash(ctx: @This(), list: []const ExprNode) u64
+        {
+            _ = ctx;
+            var hasher = std.hash.Wyhash.init(0);
+            for (list) |node|
+            {
+                std.hash.autoHash(&hasher, node);
+            }
+            return hasher.final();
+        }
+        pub fn eql(ctx: @This(), a: []const ExprNode, b: []const ExprNode) bool
+        {
+            _ = ctx;
+            for (a) |node_a, i|
+            {
+                const node_b = b[i];
+                if (!std.meta.eql(node_a, node_b)) return false;
+            }
+            return true;
+        }
+    },
+    std.hash_map.default_max_load_percentage,
+);
+const BuiltinCallSet = std.ArrayHashMapUnmanaged(
+    BuiltinCall,
+    void,
+    struct
+    {
+        pub fn hash(ctx: @This(), bcall: BuiltinCall) u32
+        {
+            _ = ctx;
+            var hasher = std.hash.Wyhash.init(0);
+            std.hash.autoHash(&hasher,  bcall.name);
+            for (bcall.params) |param|
+            {
+                std.hash.autoHash(&hasher, param);
+            }
+            return @truncate(u32, hasher.final());
+        }
+        pub fn eql(ctx: @This(), a: BuiltinCall, b: BuiltinCall, b_index: usize) bool
+        {
+            _ = ctx;
+            _ = b_index;
+            return a.name == b.name and for (a.params) |param_a, i|
+            {
+                const param_b = b.params[i];
+                if (!std.meta.eql(param_a, param_b)) break false;
+            } else true;
+        }
+    },
+    true,
+);
 fn ExternStructArraySet(comptime T: type) type {
     const Context = struct
     {
@@ -204,10 +273,7 @@ const PrimitiveValue = enum(ExprNode.Index)
 const ListInit = struct
 {
     annotations: ListInit.Annotations,
-    /// start of range in field `Generator.contiguous_node_list_store`.
-    elems_start: usize,
-    /// end of range in field `Generator.contiguous_node_list_store`.
-    elems_end: usize,
+    elems: []const ExprNode,
 
     const Annotations = union(enum)
     {
@@ -294,22 +360,129 @@ const PostfixOp = extern struct
 
     const Tag = enum(u8) { @".?", @".*" };
 };
+const BuiltinFnName = enum
+{
+    addWithOverflow,
+    alignCast,
+    alignOf,
+    as,
+    asyncCall,
+    atomicLoad,
+    atomicRmw,
+    atomicStore,
+    bitCast,
+    bitOffsetOf,
+    boolToInt,
+    bitSizeOf,
+    breakpoint,
+    mulAdd,
+    byteSwap,
+    bitReverse,
+    offsetOf,
+    call,
+    cDefine,
+    cImport,
+    cInclude,
+    clz,
+    cmpxchgStrong,
+    cmpxchgWeak,
+    compileError,
+    compileLog,
+    ctz,
+    cUndef,
+    divExact,
+    divFloor,
+    divTrunc,
+    embedFile,
+    enumToInt,
+    errorName,
+    errorReturnTrace,
+    errorToInt,
+    errSetCast,
+    @"export",
+    @"extern",
+    fence,
+    field,
+    fieldParentPtr,
+    floatCast,
+    floatToInt,
+    frame,
+    Frame,
+    frameAddress,
+    frameSize,
+    hasDecl,
+    hasField,
+    import,
+    intCast,
+    intToEnum,
+    intToError,
+    intToFloat,
+    intToPtr,
+    maximum,
+    memcpy,
+    memset,
+    minimum,
+    wasmMemorySize,
+    wasmMemoryGrow,
+    mod,
+    mulWithOverflow,
+    panic,
+    popCount,
+    prefetch,
+    ptrCast,
+    ptrToInt,
+    rem,
+    returnAddress,
+    select,
+    setAlignStack,
+    setCold,
+    setEvalBranchQuota,
+    setFloatMode,
+    setRuntimeSafety,
+    shlExact,
+    shlWithOverflow,
+    shrExact,
+    shuffle,
+    sizeOf,
+    splat,
+    reduce,
+    src,
+    sqrt,
+    sin,
+    cos,
+    tan,
+    exp,
+    exp2,
+    log,
+    log2,
+    log10,
+    fabs,
+    floor,
+    ceil,
+    trunc,
+    round,
+    subWithOverflow,
+    tagName,
+    This,
+    truncate,
+    Type,
+    typeInfo,
+    typeName,
+    TypeOf,
+    unionInit,
+    Vector,
+};
 
 const BuiltinCall = struct
 {
-    /// name of the builtin function.
-    name: []const u8,
-    /// start of range in field `Generator.contiguous_node_list_store`.
-    params_start: usize,
-    /// end of range in field `Generator.contiguous_node_list_store`.
-    params_end: usize,
+    name: BuiltinFnName,
+    params: []const ExprNode,
 };
 
-const FunctionCall = extern struct
+const FunctionCall = struct
 {
     callable: ExprNode,
-    params_start: usize,
-    params_end: usize,
+    params: []const ExprNode,
 };
 
 pub const Pointer = struct
@@ -485,7 +658,7 @@ fn formatExprNode(
                 },
             }
 
-            const elements: []const ExprNode = self.contiguous_node_list_store.items[list_init.elems_start..list_init.elems_end];
+            const elements: []const ExprNode = list_init.elems;
             try writer.writeByte('{');
             switch (elements.len)
             {
@@ -519,10 +692,10 @@ fn formatExprNode(
         }),
         .builtin_call =>
         {
-            const builtin_call: BuiltinCall = self.builtin_calls.items[node.index];
-            const params: []const ExprNode = self.contiguous_node_list_store.items[builtin_call.params_start..builtin_call.params_end];
+            const builtin_call: BuiltinCall = self.builtin_calls.keys()[node.index];
+            const params: []const ExprNode = builtin_call.params;
 
-            try writer.print("@{s}(", .{builtin_call.name});
+            try writer.print("@{s}(", .{@tagName(builtin_call.name)});
             for (params[0..params.len - @boolToInt(params.len != 0)]) |param|
             {
                 try writer.print("{}, ", .{self.fmtExprNode(param)});
@@ -536,7 +709,7 @@ fn formatExprNode(
         .function_call =>
         {
             const function_call: FunctionCall = self.function_calls.items[node.index];
-            const params: []const ExprNode = self.contiguous_node_list_store.items[function_call.params_start..function_call.params_end];
+            const params: []const ExprNode = function_call.params;
 
             try writer.print("{}(", .{self.fmtExprNode(function_call.callable)});
             for (params[0..params.len - @boolToInt(params.len != 0)]) |param|
@@ -928,15 +1101,9 @@ pub fn createListInit(
     const new = try self.list_inits.addOne(self.allocator());
     errdefer _ = self.list_inits.pop();
 
-    const elems_start = self.contiguous_node_list_store.items.len;
-    try self.contiguous_node_list_store.appendSlice(self.allocator(), nodes);
-    const elems_end = self.contiguous_node_list_store.items.len;
-    errdefer self.contiguous_node_list_store.shrinkRetainingCapacity(elems_start);
-
     new.* = .{
         .annotations = annotations,
-        .elems_start = elems_start,
-        .elems_end = elems_end,
+        .elems = try self.dupeExprNodeList(nodes),
     };
 
     return ExprNode{
@@ -1063,27 +1230,29 @@ pub fn createPostfixOp(self: *Generator, target: ExprNode, op: PostfixOp.Tag) st
     };
 }
 
-pub fn createBuiltinCall(self: *Generator, builtin_name: []const u8, params: []const ExprNode) std.mem.Allocator.Error!ExprNode
+pub fn createBuiltinCall(self: *Generator, builtin_name: BuiltinFnName, params: []const ExprNode) std.mem.Allocator.Error!ExprNode
 {
-    const duped_name = try self.dupeString(builtin_name);
-
-    const new_index = self.builtin_calls.items.len;
-    const new = try self.builtin_calls.addOne(self.allocator());
-    errdefer _ = self.builtin_calls.pop();
-
-    const params_start = self.contiguous_node_list_store.items.len;
-    try self.contiguous_node_list_store.appendSlice(self.allocator(), params);
-    const params_end = self.contiguous_node_list_store.items.len;
-    errdefer self.contiguous_node_list_store.shrinkRetainingCapacity(params_start);
-
-    new.* = .{
-        .name = duped_name,
-        .params_start = params_start,
-        .params_end = params_end,
-    };
+    const gop = try self.builtin_calls.getOrPut(self.allocator(), BuiltinCall{
+        .name = builtin_name,
+        .params = params,
+    });
+    if (!gop.found_existing)
+    {
+        gop.key_ptr.params = self.dupeExprNodeList(params) catch |err| {
+            const popped = self.builtin_calls.pop();
+            if (comptime std.debug.runtime_safety)
+            {
+                std.debug.assert(popped.key.name == builtin_name and for (popped.key.params) |param, i|
+                {
+                    if (!std.meta.eql(param, params[i])) break false;
+                } else true);
+            }
+            return err;
+        };
+    }
 
     return ExprNode{
-        .index = new_index,
+        .index = gop.index,
         .tag = .builtin_call,
     };
 }
@@ -1094,15 +1263,9 @@ pub fn createFunctionCall(self: *Generator, callable: ExprNode, params: []const 
     const new = try self.function_calls.addOne(self.allocator());
     errdefer _ = self.function_calls.pop();
 
-    const params_start = self.contiguous_node_list_store.items.len;
-    try self.contiguous_node_list_store.appendSlice(self.allocator(), params);
-    const params_end = self.contiguous_node_list_store.items.len;
-    errdefer self.contiguous_node_list_store.shrinkRetainingCapacity(params_start);
-
     new.* = .{
         .callable = callable,
-        .params_start = params_start,
-        .params_end = params_end,
+        .params = try self.dupeExprNodeList(params),
     };
 
     return ExprNode{
@@ -1160,9 +1323,7 @@ pub fn createParenthesesExpression(self: *Generator, node: ExprNode) std.mem.All
 
 pub fn createDotAccess(self: *Generator, lhs: ExprNode, rhs: []const []const u8) std.mem.Allocator.Error!ExprNode
 {
-    const new_index = self.dot_accesses.items.len;
-    const new_dot_access = try self.dot_accesses.addOne(self.allocator());
-    errdefer _ = self.dot_accesses.pop();
+    try self.dot_accesses.ensureUnusedCapacity(self.allocator(), 1);
 
     var strings = try std.ArrayList([]const u8).initCapacity(self.allocator(), rhs.len);
     errdefer strings.deinit();
@@ -1183,10 +1344,13 @@ pub fn createDotAccess(self: *Generator, lhs: ExprNode, rhs: []const []const u8)
         strings.appendAssumeCapacity(linear_str.items[start..end]);
     }
 
-    new_dot_access.* = .{
+    const new_index = self.dot_accesses.items.len;
+    self.dot_accesses.appendAssumeCapacity(DotAccess{
         .lhs = lhs,
         .rhs = strings.toOwnedSlice(),
-    };
+    });
+    errdefer _ = self.dot_accesses.pop();
+
     return ExprNode{
         .index = new_index,
         .tag = .dot_access,
@@ -1331,8 +1495,8 @@ test "node printing behavior"
 
     try gen.expectNodeFmt("u32", u32_type);
     try gen.expectNodeFmt("43",  literal_43);
-    try gen.expectNodeFmt("@as(*u32, undefined).*", try gen.createPostfixOp(try gen.createBuiltinCall("as", &.{ p_u32_type, Generator.undefinedValue() }), .@".*"));
-    try gen.expectNodeFmt("@This()", try gen.createBuiltinCall("This", &.{}));
+    try gen.expectNodeFmt("@as(*u32, undefined).*", try gen.createPostfixOp(try gen.createBuiltinCall(.as, &.{ p_u32_type, Generator.undefinedValue() }), .@".*"));
+    try gen.expectNodeFmt("@This()", try gen.createBuiltinCall(.This, &.{}));
     try gen.expectNodeFmt("type", Generator.primType(type));
     try gen.expectNodeFmt("(43)", try gen.createParenthesesExpression(literal_43));
     try gen.expectNodeFmt("(43 + 43)", try gen.createParenthesesExpression(try gen.createBinOp(literal_43, .@"+", literal_43)));
@@ -1430,7 +1594,7 @@ test "node printing behavior"
 
     try gen.expectNodeFmt(
         "usingnamespace @import(\"std\");\n",
-        try gen.createUsingnamespace(try gen.createBuiltinCall("import", &.{ try gen.createStringLiteral("std") })),
+        try gen.createUsingnamespace(try gen.createBuiltinCall(.import, &.{ try gen.createStringLiteral("std") })),
     );
 }
 
@@ -1441,7 +1605,7 @@ test "top level decls"
     var gen = Generator.init(allocator);
     defer gen.deinit();
 
-    const std_import = try gen.addDecl(false, .Const, "std", null, try gen.createBuiltinCall("import", &.{ try gen.createStringLiteral("std") }));
+    const std_import = try gen.addDecl(false, .Const, "std", null, try gen.createBuiltinCall(.import, &.{ try gen.createStringLiteral("std") }));
     const array_list_ref_decl = try gen.addDecl(false, .Const, "ArrayListUnmanaged", null, try gen.createDotAccess(std_import, &.{ "ArrayListUnmanaged" }));
     const string_type_decl = try gen.addDecl(true, .Const, "String", null, try gen.createFunctionCall(array_list_ref_decl, &.{ Generator.intType(u8) }));
 
