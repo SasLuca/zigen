@@ -942,18 +942,12 @@ pub fn createListInit(
 
 pub fn createRawCode(self: *Generator, literal_str: []const u8) std.mem.Allocator.Error!ExprNode
 {
+    const duped_str = try self.dupeString(literal_str);
+
     const gop = try self.ordered_string_set.getOrPut(self.allocator(), literal_str);
     if (!gop.found_existing)
     {
-        gop.key_ptr.* = self.dupeString(literal_str) catch |err|
-        {
-            const popped_str = self.ordered_string_set.pop().key;
-            if (@import("builtin").mode == .Debug)
-            {
-                std.debug.assert(std.mem.eql(u8, popped_str, literal_str));
-            }
-            return err;
-        };
+        gop.key_ptr.* = duped_str;
     }
 
     return ExprNode{
@@ -1165,8 +1159,8 @@ pub fn createDotAccess(self: *Generator, lhs: ExprNode, rhs: []const []const u8)
     const new_dot_access = try self.dot_accesses.addOne(self.allocator());
     errdefer _ = self.dot_accesses.pop();
 
-    var ordered_string_set = try std.ArrayList([]const u8).initCapacity(self.allocator(), rhs.len);
-    errdefer ordered_string_set.deinit();
+    var strings = try std.ArrayList([]const u8).initCapacity(self.allocator(), rhs.len);
+    errdefer strings.deinit();
 
     var linear_str = std.ArrayList(u8).init(self.allocator());
     errdefer linear_str.deinit();
@@ -1181,12 +1175,12 @@ pub fn createDotAccess(self: *Generator, lhs: ExprNode, rhs: []const []const u8)
         const start = linear_str.items.len;
         linear_str.appendSliceAssumeCapacity(str);
         const end = linear_str.items.len;
-        ordered_string_set.appendAssumeCapacity(linear_str.items[start..end]);
+        strings.appendAssumeCapacity(linear_str.items[start..end]);
     }
 
     new_dot_access.* = .{
         .lhs = lhs,
-        .rhs = ordered_string_set.toOwnedSlice(),
+        .rhs = strings.toOwnedSlice(),
     };
     return ExprNode{
         .index = new_index,
