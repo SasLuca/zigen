@@ -1182,10 +1182,10 @@ pub fn createBigIntLiteral(self: *Generator, radix: IntLiteralRadix, big_int: st
         };
     }
 
-    try self.scratch_space.ensureTotalCapacity(
+    try self.scratch_space.ensureTotalCapacityPrecise(
         self.allocator(),
         big_int.sizeInBaseUpperBound(base) +
-            std.math.big.int.calcToStringLimbsBufferLen(big_int.limbs.len, base) * @sizeOf(std.math.big.Limb),
+            (std.math.big.int.calcToStringLimbsBufferLen(big_int.limbs.len, base) * @sizeOf(std.math.big.Limb)) + 1,
     );
     self.scratch_space.expandToCapacity();
 
