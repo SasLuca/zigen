@@ -304,43 +304,73 @@ pub const ExprNode = extern struct
         /// index into field `Generator.ordered_node_set`.
         @"prefix_op &",
 
+        /// index into field `Generator.bin_op_operands`.
         @"bin_op +",
+        /// index into field `Generator.bin_op_operands`.
         @"bin_op +%",
+        /// index into field `Generator.bin_op_operands`.
         @"bin_op +|",
 
+        /// index into field `Generator.bin_op_operands`.
         @"bin_op -",
+        /// index into field `Generator.bin_op_operands`.
         @"bin_op -%",
+        /// index into field `Generator.bin_op_operands`.
         @"bin_op -|",
 
+        /// index into field `Generator.bin_op_operands`.
         @"bin_op *",
+        /// index into field `Generator.bin_op_operands`.
         @"bin_op *%",
+        /// index into field `Generator.bin_op_operands`.
         @"bin_op *|",
 
+        /// index into field `Generator.bin_op_operands`.
         @"bin_op /",
+        /// index into field `Generator.bin_op_operands`.
         @"bin_op %",
 
+        /// index into field `Generator.bin_op_operands`.
         @"bin_op <<",
+        /// index into field `Generator.bin_op_operands`.
         @"bin_op <<|",
+        /// index into field `Generator.bin_op_operands`.
         @"bin_op >>",
+        /// index into field `Generator.bin_op_operands`.
         @"bin_op &",
+        /// index into field `Generator.bin_op_operands`.
         @"bin_op |",
+        /// index into field `Generator.bin_op_operands`.
         @"bin_op ^",
 
+        /// index into field `Generator.bin_op_operands`.
         @"bin_op orelse",
+        /// index into field `Generator.bin_op_operands`.
         @"bin_op catch",
 
+        /// index into field `Generator.bin_op_operands`.
         @"bin_op and",
+        /// index into field `Generator.bin_op_operands`.
         @"bin_op or",
 
+        /// index into field `Generator.bin_op_operands`.
         @"bin_op ==",
+        /// index into field `Generator.bin_op_operands`.
         @"bin_op !=",
+        /// index into field `Generator.bin_op_operands`.
         @"bin_op >",
+        /// index into field `Generator.bin_op_operands`.
         @"bin_op >=",
+        /// index into field `Generator.bin_op_operands`.
         @"bin_op <",
+        /// index into field `Generator.bin_op_operands`.
         @"bin_op <=",
 
+        /// index into field `Generator.bin_op_operands`.
         @"bin_op ++",
+        /// index into field `Generator.bin_op_operands`.
         @"bin_op **",
+        /// index into field `Generator.bin_op_operands`.
         @"bin_op ||",
 
         /// index into field `Generator.ordered_node_set`.
