@@ -11,9 +11,7 @@ ordered_node_set: ExternStructArraySet(ExprNode) = .{},
 
 big_int_literals: BigIntSet = .{},
 list_inits: std.ArrayListUnmanaged(ListInit) = .{},
-prefix_ops: ExternStructArraySet(PrefixOp) = .{},
-bin_ops: std.ArrayListUnmanaged(BinOp) = .{},
-postfix_ops: ExternStructArraySet(PostfixOp) = .{},
+bin_op_operands: ExternStructArraySet(BinOpOperands) = .{},
 builtin_calls: BuiltinCallSet = .{},
 function_calls: FunctionCallSet = .{},
 pointers: std.MultiArrayList(Pointer) = .{},
@@ -117,7 +115,7 @@ const BuiltinCallSet = std.ArrayHashMapUnmanaged(
         {
             _ = ctx;
             var hasher = std.hash.Wyhash.init(0);
-            std.hash.autoHash(&hasher,  bcall.name);
+            std.hash.autoHash(&hasher, bcall.name);
             for (bcall.params) |param|
             {
                 std.hash.autoHash(&hasher, param);
@@ -199,9 +197,9 @@ const ErrorSetsSet = std.ArrayHashMapUnmanaged(
 fn ExternStructArraySet(comptime T: type) type {
     const Context = struct
     {
-        pub fn hash(self: @This(), prefix_op: T) u32 {
+        pub fn hash(self: @This(), k: T) u32 {
             _ = self;
-            return @truncate(u32, std.hash.Wyhash.hash(0, std.mem.asBytes(&prefix_op)));
+            return @truncate(u32, std.hash.Wyhash.hash(0, std.mem.asBytes(&k)));
         }
         pub fn eql(self: @This(), a: T, b: T, b_index: usize) bool {
             _ = self;
@@ -290,14 +288,66 @@ pub const ExprNode = extern struct
         char_literal,
         /// index into field `Generator.ordered_string_set`.
         string_literal,
+        /// index into field `Generator.ordered_string_set`.
+        enum_literal,
         /// index into field `Generator.list_inits`.
         list_init,
-        /// index into field `Generator.prefix_ops`.
-        prefix_op,
-        /// index into field `Generator.bin_ops`.
-        bin_op,
-        /// index into field `Generator.postfix_ops`.
-        postfix_op,
+
+        /// index into field `Generator.ordered_node_set`.
+        @"prefix_op -",
+        /// index into field `Generator.ordered_node_set`.
+        @"prefix_op -%",
+        /// index into field `Generator.ordered_node_set`.
+        @"prefix_op ~",
+        /// index into field `Generator.ordered_node_set`.
+        @"prefix_op !",
+        /// index into field `Generator.ordered_node_set`.
+        @"prefix_op &",
+
+        @"bin_op +",
+        @"bin_op +%",
+        @"bin_op +|",
+
+        @"bin_op -",
+        @"bin_op -%",
+        @"bin_op -|",
+
+        @"bin_op *",
+        @"bin_op *%",
+        @"bin_op *|",
+
+        @"bin_op /",
+        @"bin_op %",
+
+        @"bin_op <<",
+        @"bin_op <<|",
+        @"bin_op >>",
+        @"bin_op &",
+        @"bin_op |",
+        @"bin_op ^",
+
+        @"bin_op orelse",
+        @"bin_op catch",
+
+        @"bin_op and",
+        @"bin_op or",
+
+        @"bin_op ==",
+        @"bin_op !=",
+        @"bin_op >",
+        @"bin_op >=",
+        @"bin_op <",
+        @"bin_op <=",
+
+        @"bin_op ++",
+        @"bin_op **",
+        @"bin_op ||",
+
+        /// index into field `Generator.ordered_node_set`.
+        @"postfix_op .?",
+        /// index into field `Generator.ordered_node_set`.
+        @"postfix_op .*",
+
         /// index into field `Generator.builtin_calls`.
         builtin_call,
         /// index into field `Generator.function_calls`.
@@ -379,75 +429,12 @@ const ListInit = struct
     };
 };
 
-const PrefixOp = extern struct
-{
-    tag: PrefixOp.Tag,
-    target: ExprNode,
-
-    const Tag = enum(u8)
-    {
-        @"-",
-        @"-%",
-        @"~",
-        @"!",
-        @"&",
-    };
-};
-const BinOp = extern struct
+const BinOpOperands = extern struct
 {
     lhs: ExprNode,
-    tag: BinOp.Tag,
     rhs: ExprNode,
-
-    const Tag = enum(u8)
-    {
-        @"+",
-        @"+%",
-        @"+|",
-
-        @"-",
-        @"-%",
-        @"-|",
-
-        @"*",
-        @"*%",
-        @"*|",
-
-        @"/",
-        @"%",
-
-        @"<<",
-        @"<<|",
-        @">>",
-        @"&",
-        @"|",
-        @"^",
-
-        @"orelse",
-        @"catch",
-
-        @"and",
-        @"or",
-
-        @"==",
-        @"!=",
-        @">",
-        @">=",
-        @"<",
-        @"<=",
-
-        @"++",
-        @"**",
-        @"||",
-    };
 };
-const PostfixOp = extern struct
-{
-    tag: PostfixOp.Tag,
-    target: ExprNode,
 
-    const Tag = enum(u8) { @".?", @".*" };
-};
 const BuiltinFnName = enum
 {
     addWithOverflow,
@@ -731,6 +718,7 @@ fn formatExprNode(
         .raw_code_literal => try writer.writeAll(self.ordered_string_set.keys()[node.index]),
         .char_literal => try writer.print("'{s}'", .{self.ordered_string_set.keys()[node.index]}),
         .string_literal => try writer.print("\"{s}\"", .{self.ordered_string_set.keys()[node.index]}),
+        .enum_literal => try writer.print(".{s}", .{std.zig.fmtId(self.ordered_string_set.keys()[node.index])}),
         .list_init =>
         {
             const list_init: ListInit = self.list_inits.items[node.index];
@@ -780,19 +768,67 @@ fn formatExprNode(
             }
             try writer.writeByte('}');
         },
-        .prefix_op => try writer.print("{s}{}", .{
-            @tagName(self.prefix_ops.keys()[node.index].tag),
-            self.fmtExprNode(self.prefix_ops.keys()[node.index].target),
-        }),
-        .bin_op => try writer.print("{} {s} {}", .{
-            self.fmtExprNode(self.bin_ops.items[node.index].lhs),
-            @tagName(self.bin_ops.items[node.index].tag),
-            self.fmtExprNode(self.bin_ops.items[node.index].rhs),
-        }),
-        .postfix_op => try writer.print("{}{s}", .{
-            self.fmtExprNode(self.postfix_ops.keys()[node.index].target),
-            @tagName(self.postfix_ops.keys()[node.index].tag),
-        }),
+
+        .@"prefix_op -",
+        .@"prefix_op -%",
+        .@"prefix_op ~",
+        .@"prefix_op !",
+        .@"prefix_op &",
+        =>
+        {
+            const op_str = @tagName(node.tag)["prefix_op ".len..];
+            const target = self.ordered_node_set.keys()[node.index];
+            try writer.print("{s}{}", .{op_str, self.fmtExprNode(target)});
+        },
+
+        .@"bin_op +",
+        .@"bin_op +%",
+        .@"bin_op +|",
+        .@"bin_op -",
+        .@"bin_op -%",
+        .@"bin_op -|",
+        .@"bin_op *",
+        .@"bin_op *%",
+        .@"bin_op *|",
+        .@"bin_op /",
+        .@"bin_op %",
+        .@"bin_op <<",
+        .@"bin_op <<|",
+        .@"bin_op >>",
+        .@"bin_op &",
+        .@"bin_op |",
+        .@"bin_op ^",
+        .@"bin_op orelse",
+        .@"bin_op catch",
+        .@"bin_op and",
+        .@"bin_op or",
+        .@"bin_op ==",
+        .@"bin_op !=",
+        .@"bin_op >",
+        .@"bin_op >=",
+        .@"bin_op <",
+        .@"bin_op <=",
+        .@"bin_op ++",
+        .@"bin_op **",
+        .@"bin_op ||",
+        =>
+        {
+            const op_str = @tagName(node.tag)["bin_op ".len..];
+            const operands = self.bin_op_operands.keys()[node.index];
+            const lhs = operands.lhs;
+            const rhs = operands.rhs;
+            try writer.print("{} {s} {}", .{self.fmtExprNode(lhs), op_str, self.fmtExprNode(rhs)});
+        },
+
+        .@"postfix_op .?",
+        .@"postfix_op .*",
+        =>
+        {
+            const op_str = @tagName(node.tag)["postfix_op ".len..];
+            const target = self.ordered_node_set.keys()[node.index];
+            try writer.print("{}{s}", .{self.fmtExprNode(target), op_str});
+        },
+
         .builtin_call =>
         {
             const builtin_call: BuiltinCall = self.builtin_calls.keys()[node.index];
@@ -878,8 +914,41 @@ fn formatExprNode(
                 .unsigned_int_type,
                 .signed_int_type,
                 .raw_code_literal,
-                .bin_op,
-                .postfix_op,
+
+                .@"bin_op +",
+                .@"bin_op +%",
+                .@"bin_op +|",
+                .@"bin_op -",
+                .@"bin_op -%",
+                .@"bin_op -|",
+                .@"bin_op *",
+                .@"bin_op *%",
+                .@"bin_op *|",
+                .@"bin_op /",
+                .@"bin_op %",
+                .@"bin_op <<",
+                .@"bin_op <<|",
+                .@"bin_op >>",
+                .@"bin_op &",
+                .@"bin_op |",
+                .@"bin_op ^",
+                .@"bin_op orelse",
+                .@"bin_op catch",
+                .@"bin_op and",
+                .@"bin_op or",
+                .@"bin_op ==",
+                .@"bin_op !=",
+                .@"bin_op >",
+                .@"bin_op >=",
+                .@"bin_op <",
+                .@"bin_op <=",
+                .@"bin_op ++",
+                .@"bin_op **",
+                .@"bin_op ||",
+
+                .@"postfix_op .?",
+                .@"postfix_op .*",
+
                 .builtin_call,
                 .function_call,
                 .optional,
@@ -905,8 +974,14 @@ fn formatExprNode(
                 .primitive_value => unreachable,
                 .char_literal => unreachable,
                 .string_literal => unreachable,
+                .enum_literal => unreachable,
                 .list_init => unreachable,
-                .prefix_op => unreachable,
+
+                .@"prefix_op -" => unreachable,
+                .@"prefix_op -%" => unreachable,
+                .@"prefix_op ~" => unreachable,
+                .@"prefix_op !" => unreachable,
+                .@"prefix_op &" => unreachable,
             }
         },
         .parentheses_expression => try writer.print("({})", .{self.fmtExprNode(self.ordered_node_set.keys()[node.index])}),
@@ -1220,6 +1295,20 @@ pub fn createIntLiteral(self: *Generator, radix: IntLiteralRadix, value: anytype
     }
 }
 
+pub fn createEnumLiteral(self: *Generator, tag_name: []const u8) std.mem.Allocator.Error!ExprNode
+{
+    const duped_tag_name = try self.dupeString(tag_name);
+    const gop = try self.ordered_string_set.getOrPut(self.allocator(), duped_tag_name);
+    return ExprNode{
+        .index = gop.index,
+        .tag = .enum_literal,
+    };
+}
+pub fn createEnumLiteralFrom(self: *Generator, comptime literal: @Type(.EnumLiteral)) std.mem.Allocator.Error!ExprNode
+{
+    return self.createEnumLiteral(@tagName(literal));
+}
+
 pub fn createListInit(
     self: *Generator,
     annotations: ListInit.Annotations,
@@ -1244,13 +1333,7 @@ pub fn createListInit(
 pub fn createRawCode(self: *Generator, literal_str: []const u8) std.mem.Allocator.Error!ExprNode
 {
     const duped_str = try self.dupeString(literal_str);
-
-    const gop = try self.ordered_string_set.getOrPut(self.allocator(), literal_str);
-    if (!gop.found_existing)
-    {
-        gop.key_ptr.* = duped_str;
-    }
-
+    const gop = try self.ordered_string_set.getOrPut(self.allocator(), duped_str);
     return ExprNode{
         .index = gop.index,
         .tag = .raw_code_literal,
@@ -1317,45 +1400,137 @@ pub fn createStringLiteral(self: *Generator, content: []const u8) std.mem.Alloca
     };
 }
 
-pub fn createPrefixOp(self: *Generator, op: PrefixOp.Tag, target: ExprNode) std.mem.Allocator.Error!ExprNode
+pub const PrefixOp = enum
 {
-    const gop = try self.prefix_ops.getOrPut(self.allocator(), PrefixOp{
-        .tag = op,
-        .target = target,
-    });
+    @"-",
+    @"-%",
+    @"~",
+    @"!",
+    @"&",
+};
+pub fn createPrefixOp(self: *Generator, op: PrefixOp, target: ExprNode) std.mem.Allocator.Error!ExprNode
+{
+    const gop = try self.ordered_node_set.getOrPut(self.allocator(), target);
     return ExprNode{
         .index = gop.index,
-        .tag = .prefix_op,
+        .tag = switch (op)
+        {
+            .@"-" => .@"prefix_op -",
+            .@"-%" => .@"prefix_op -%",
+            .@"~" => .@"prefix_op ~",
+            .@"!" => .@"prefix_op !",
+            .@"&" => .@"prefix_op &",
+        },
     };
 }
 
-pub fn createBinOp(self: *Generator, lhs: ExprNode, op: BinOp.Tag, rhs: ExprNode) std.mem.Allocator.Error!ExprNode
+pub const BinOp = enum(u8)
 {
-    const new_index = self.bin_ops.items.len;
-    const new = try self.bin_ops.addOne(self.allocator());
-    errdefer _ = self.bin_ops.pop();
+    @"+",
+    @"+%",
+    @"+|",
 
-    new.* = .{
+    @"-",
+    @"-%",
+    @"-|",
+
+    @"*",
+    @"*%",
+    @"*|",
+
+    @"/",
+    @"%",
+
+    @"<<",
+    @"<<|",
+    @">>",
+    @"&",
+    @"|",
+    @"^",
+
+    @"orelse",
+    @"catch",
+
+    @"and",
+    @"or",
+
+    @"==",
+    @"!=",
+    @">",
+    @">=",
+    @"<",
+    @"<=",
+
+    @"++",
+    @"**",
+    @"||",
+};
+pub fn createBinOp(self: *Generator, lhs: ExprNode, op: BinOp, rhs: ExprNode) std.mem.Allocator.Error!ExprNode
+{
+    const gop = try self.bin_op_operands.getOrPut(self.allocator(), BinOpOperands{
         .lhs = lhs,
-        .tag = op,
         .rhs = rhs,
-    };
-
-    return ExprNode{
-        .index = new_index,
-        .tag = .bin_op,
-    };
-}
-
-pub fn createPostfixOp(self: *Generator, target: ExprNode, op: PostfixOp.Tag) std.mem.Allocator.Error!ExprNode
-{
-    const gop = try self.postfix_ops.getOrPut(self.allocator(), PostfixOp{
-        .tag = op,
-        .target = target,
     });
     return ExprNode{
         .index = gop.index,
-        .tag = .postfix_op,
+        .tag = switch (op)
+        {
+            .@"+" => .@"bin_op +",
+            .@"+%" => .@"bin_op +%",
+            .@"+|" => .@"bin_op +|",
+
+            .@"-" => .@"bin_op -",
+            .@"-%" => .@"bin_op -%",
+            .@"-|" => .@"bin_op -|",
+
+            .@"*" => .@"bin_op *",
+            .@"*%" => .@"bin_op *%",
+            .@"*|" => .@"bin_op *|",
+
+            .@"/" => .@"bin_op /",
+            .@"%" => .@"bin_op %",
+
+            .@"<<" => .@"bin_op <<",
+            .@"<<|" => .@"bin_op <<|",
+            .@">>" => .@"bin_op >>",
+            .@"&" => .@"bin_op &",
+            .@"|" => .@"bin_op |",
+            .@"^" => .@"bin_op ^",
+
+            .@"orelse" => .@"bin_op orelse",
+            .@"catch" => .@"bin_op catch",
+
+            .@"and" => .@"bin_op and",
+            .@"or" => .@"bin_op or",
+
+            .@"==" => .@"bin_op ==",
+            .@"!=" => .@"bin_op !=",
+            .@">" => .@"bin_op >",
+            .@">=" => .@"bin_op >=",
+            .@"<" => .@"bin_op <",
+            .@"<=" => .@"bin_op <=",
+
+            .@"++" => .@"bin_op ++",
+            .@"**" => .@"bin_op **",
+            .@"||" => .@"bin_op ||",
+        },
+    };
+}
+
+pub const PostfixOp = enum {
+    @".?",
+    @".*",
+};
+pub fn createPostfixOp(self: *Generator, target: ExprNode, op: PostfixOp) std.mem.Allocator.Error!ExprNode
+{
+    const gop = try self.ordered_node_set.getOrPut(self.allocator(), target);
+    return ExprNode{
+        .index = gop.index,
+        .tag = switch (op)
+        {
+            .@".?" => .@"postfix_op .?",
+            .@".*" => .@"postfix_op .*",
+        },
     };
 }
 
@@ -1664,6 +1839,8 @@ test "node printing behavior"
     try gen.expectNodeFmt("(43)", try gen.createParenthesesExpression(literal_43));
     try gen.expectNodeFmt("(43 + 43)", try gen.createParenthesesExpression(try gen.createBinOp(literal_43, .@"+", literal_43)));
     try gen.expectNodeFmt(std.fmt.comptimePrint("{d}", .{std.math.maxInt(usize) + 1}), try gen.createIntLiteral(.decimal, std.math.maxInt(usize) + 1));
+    try gen.expectNodeFmt(".fizzbuzz", try gen.createEnumLiteralFrom(.fizzbuzz));
+    try gen.expectNodeFmt(".@\"continue\"", try gen.createEnumLiteral("continue"));
 
     try gen.expectNodeFmt(".{}", try gen.createListInit(.none, &.{}));
     try gen.expectNodeFmt(".{43}", try gen.createListInit(.none, &.{literal_43}));
@@ -1769,6 +1946,37 @@ test "node printing behavior"
         "pub usingnamespace @import(\"std\");\n",
         try gen.createUsingnamespace(true, try gen.createBuiltinCall(.import, &.{try gen.createStringLiteral("std")})),
     );
+}
+
+test "thorough check for prefix/bin/postfix ops"
+{
+    var gen = Generator.init(std.testing.allocator);
+    defer gen.deinit();
+
+    const operand_a = try gen.addDecl(false, .Const, "a", null, try gen.createIntLiteral(.decimal, 1));
+    const operand_b = try gen.addDecl(false, .Const, "b", null, try gen.createIntLiteral(.decimal, 2));
+    _ = operand_b;
+
+    for (std.enums.values(PrefixOp)) |op_tag|
+    {
+        var buff = [_]u8{0} ** std.fmt.count("{s}a", .{"####" ** 10});
+        const expected = try std.fmt.bufPrint(&buff, "{s}a", .{@tagName(op_tag)});
+        try gen.expectNodeFmt(expected, try gen.createPrefixOp(op_tag, operand_a));
+    }
+
+    for (std.enums.values(PostfixOp)) |op_tag|
+    {
+        var buff = [_]u8{0} ** std.fmt.count("a{s}", .{"####" ** 10});
+        const expected = try std.fmt.bufPrint(&buff, "a{s}", .{@tagName(op_tag)});
+        try gen.expectNodeFmt(expected, try gen.createPostfixOp(operand_a, op_tag));
+    }
+
+    for (std.enums.values(BinOp)) |op_tag|
+    {
+        var buff = [_]u8{0} ** std.fmt.count("a {s} b", .{"####" ** 10});
+        const expected = try std.fmt.bufPrint(&buff, "a {s} b", .{@tagName(op_tag)});
+        try gen.expectNodeFmt(expected, try gen.createBinOp(operand_a, op_tag, operand_b));
+    }
 }
 
 test "top level decls"
