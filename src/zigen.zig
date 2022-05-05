@@ -11,7 +11,7 @@ ordered_node_set: ExternStructArraySet(ExprNode) = .{},
 
 big_int_literals: BigIntSet = .{},
 list_inits: std.ArrayListUnmanaged(ListInit) = .{},
-bin_op_operands: ExternStructArraySet(BinOpOperands) = .{},
+bin_expr_operands: ExternStructArraySet(BinaryExprOperands) = .{},
 builtin_calls: BuiltinCallSet = .{},
 function_calls: FunctionCallSet = .{},
 pointers: std.MultiArrayList(Pointer) = .{},
@@ -293,91 +293,6 @@ pub const ExprNode = extern struct
         /// index into field `Generator.list_inits`.
         list_init,
 
-        /// index into field `Generator.ordered_node_set`.
-        @"prefix_op -",
-        /// index into field `Generator.ordered_node_set`.
-        @"prefix_op -%",
-        /// index into field `Generator.ordered_node_set`.
-        @"prefix_op ~",
-        /// index into field `Generator.ordered_node_set`.
-        @"prefix_op !",
-        /// index into field `Generator.ordered_node_set`.
-        @"prefix_op &",
-
-        /// index into field `Generator.bin_op_operands`.
-        @"bin_op +",
-        /// index into field `Generator.bin_op_operands`.
-        @"bin_op +%",
-        /// index into field `Generator.bin_op_operands`.
-        @"bin_op +|",
-
-        /// index into field `Generator.bin_op_operands`.
-        @"bin_op -",
-        /// index into field `Generator.bin_op_operands`.
-        @"bin_op -%",
-        /// index into field `Generator.bin_op_operands`.
-        @"bin_op -|",
-
-        /// index into field `Generator.bin_op_operands`.
-        @"bin_op *",
-        /// index into field `Generator.bin_op_operands`.
-        @"bin_op *%",
-        /// index into field `Generator.bin_op_operands`.
-        @"bin_op *|",
-
-        /// index into field `Generator.bin_op_operands`.
-        @"bin_op /",
-        /// index into field `Generator.bin_op_operands`.
-        @"bin_op %",
-
-        /// index into field `Generator.bin_op_operands`.
-        @"bin_op <<",
-        /// index into field `Generator.bin_op_operands`.
-        @"bin_op <<|",
-        /// index into field `Generator.bin_op_operands`.
-        @"bin_op >>",
-        /// index into field `Generator.bin_op_operands`.
-        @"bin_op &",
-        /// index into field `Generator.bin_op_operands`.
-        @"bin_op |",
-        /// index into field `Generator.bin_op_operands`.
-        @"bin_op ^",
-
-        /// index into field `Generator.bin_op_operands`.
-        @"bin_op orelse",
-        /// index into field `Generator.bin_op_operands`.
-        @"bin_op catch",
-
-        /// index into field `Generator.bin_op_operands`.
-        @"bin_op and",
-        /// index into field `Generator.bin_op_operands`.
-        @"bin_op or",
-
-        /// index into field `Generator.bin_op_operands`.
-        @"bin_op ==",
-        /// index into field `Generator.bin_op_operands`.
-        @"bin_op !=",
-        /// index into field `Generator.bin_op_operands`.
-        @"bin_op >",
-        /// index into field `Generator.bin_op_operands`.
-        @"bin_op >=",
-        /// index into field `Generator.bin_op_operands`.
-        @"bin_op <",
-        /// index into field `Generator.bin_op_operands`.
-        @"bin_op <=",
-
-        /// index into field `Generator.bin_op_operands`.
-        @"bin_op ++",
-        /// index into field `Generator.bin_op_operands`.
-        @"bin_op **",
-        /// index into field `Generator.bin_op_operands`.
-        @"bin_op ||",
-
-        /// index into field `Generator.ordered_node_set`.
-        @"postfix_op .?",
-        /// index into field `Generator.ordered_node_set`.
-        @"postfix_op .*",
-
         /// index into field `Generator.builtin_calls`.
         builtin_call,
         /// index into field `Generator.function_calls`.
@@ -393,8 +308,97 @@ pub const ExprNode = extern struct
         /// index into field `Generator.decls`.
         decl_ref,
 
+        /// index into field `Generator.ordered_node_set`.
+        error_union_inferred,
+        /// index into field `Generator.bin_expr_operands`.
+        error_union,
         /// index into field `Generator.error_sets_set`.
         error_set,
+
+        /// index into field `Generator.ordered_node_set`.
+        @"prefix_op -",
+        /// index into field `Generator.ordered_node_set`.
+        @"prefix_op -%",
+        /// index into field `Generator.ordered_node_set`.
+        @"prefix_op ~",
+        /// index into field `Generator.ordered_node_set`.
+        @"prefix_op !",
+        /// index into field `Generator.ordered_node_set`.
+        @"prefix_op &",
+
+        /// index into field `Generator.bin_expr_operands`.
+        @"bin_op +",
+        /// index into field `Generator.bin_expr_operands`.
+        @"bin_op +%",
+        /// index into field `Generator.bin_expr_operands`.
+        @"bin_op +|",
+
+        /// index into field `Generator.bin_expr_operands`.
+        @"bin_op -",
+        /// index into field `Generator.bin_expr_operands`.
+        @"bin_op -%",
+        /// index into field `Generator.bin_expr_operands`.
+        @"bin_op -|",
+
+        /// index into field `Generator.bin_expr_operands`.
+        @"bin_op *",
+        /// index into field `Generator.bin_expr_operands`.
+        @"bin_op *%",
+        /// index into field `Generator.bin_expr_operands`.
+        @"bin_op *|",
+
+        /// index into field `Generator.bin_expr_operands`.
+        @"bin_op /",
+        /// index into field `Generator.bin_expr_operands`.
+        @"bin_op %",
+
+        /// index into field `Generator.bin_expr_operands`.
+        @"bin_op <<",
+        /// index into field `Generator.bin_expr_operands`.
+        @"bin_op <<|",
+        /// index into field `Generator.bin_expr_operands`.
+        @"bin_op >>",
+        /// index into field `Generator.bin_expr_operands`.
+        @"bin_op &",
+        /// index into field `Generator.bin_expr_operands`.
+        @"bin_op |",
+        /// index into field `Generator.bin_expr_operands`.
+        @"bin_op ^",
+
+        /// index into field `Generator.bin_expr_operands`.
+        @"bin_op orelse",
+        /// index into field `Generator.bin_expr_operands`.
+        @"bin_op catch",
+
+        /// index into field `Generator.bin_expr_operands`.
+        @"bin_op and",
+        /// index into field `Generator.bin_expr_operands`.
+        @"bin_op or",
+
+        /// index into field `Generator.bin_expr_operands`.
+        @"bin_op ==",
+        /// index into field `Generator.bin_expr_operands`.
+        @"bin_op !=",
+        /// index into field `Generator.bin_expr_operands`.
+        @"bin_op >",
+        /// index into field `Generator.bin_expr_operands`.
+        @"bin_op >=",
+        /// index into field `Generator.bin_expr_operands`.
+        @"bin_op <",
+        /// index into field `Generator.bin_expr_operands`.
+        @"bin_op <=",
+
+        /// index into field `Generator.bin_expr_operands`.
+        @"bin_op ++",
+        /// index into field `Generator.bin_expr_operands`.
+        @"bin_op **",
+        /// index into field `Generator.bin_expr_operands`.
+        @"bin_op ||",
+
+        /// index into field `Generator.ordered_node_set`.
+        @"postfix_op .?",
+        /// index into field `Generator.ordered_node_set`.
+        @"postfix_op .*",
     };
 
     fn unwrap(self: ExprNode) ?ExprNode
@@ -459,7 +463,7 @@ const ListInit = struct
     };
 };
 
-const BinOpOperands = extern struct
+const BinaryExprOperands = extern struct
 {
     lhs: ExprNode,
     rhs: ExprNode,
@@ -799,66 +803,6 @@ fn formatExprNode(
             try writer.writeByte('}');
         },
 
-        .@"prefix_op -",
-        .@"prefix_op -%",
-        .@"prefix_op ~",
-        .@"prefix_op !",
-        .@"prefix_op &",
-        =>
-        {
-            const op_str = @tagName(node.tag)["prefix_op ".len..];
-            const target = self.ordered_node_set.keys()[node.index];
-            try writer.print("{s}{}", .{op_str, self.fmtExprNode(target)});
-        },
-
-        .@"bin_op +",
-        .@"bin_op +%",
-        .@"bin_op +|",
-        .@"bin_op -",
-        .@"bin_op -%",
-        .@"bin_op -|",
-        .@"bin_op *",
-        .@"bin_op *%",
-        .@"bin_op *|",
-        .@"bin_op /",
-        .@"bin_op %",
-        .@"bin_op <<",
-        .@"bin_op <<|",
-        .@"bin_op >>",
-        .@"bin_op &",
-        .@"bin_op |",
-        .@"bin_op ^",
-        .@"bin_op orelse",
-        .@"bin_op catch",
-        .@"bin_op and",
-        .@"bin_op or",
-        .@"bin_op ==",
-        .@"bin_op !=",
-        .@"bin_op >",
-        .@"bin_op >=",
-        .@"bin_op <",
-        .@"bin_op <=",
-        .@"bin_op ++",
-        .@"bin_op **",
-        .@"bin_op ||",
-        =>
-        {
-            const op_str = @tagName(node.tag)["bin_op ".len..];
-            const operands = self.bin_op_operands.keys()[node.index];
-            const lhs = operands.lhs;
-            const rhs = operands.rhs;
-            try writer.print("{} {s} {}", .{self.fmtExprNode(lhs), op_str, self.fmtExprNode(rhs)});
-        },
-
-        .@"postfix_op .?",
-        .@"postfix_op .*",
-        =>
-        {
-            const op_str = @tagName(node.tag)["postfix_op ".len..];
-            const target = self.ordered_node_set.keys()[node.index];
-            try writer.print("{}{s}", .{self.fmtExprNode(target), op_str});
-        },
-
         .builtin_call =>
         {
             const builtin_call: BuiltinCall = self.builtin_calls.keys()[node.index];
@@ -945,40 +889,6 @@ fn formatExprNode(
                 .signed_int_type,
                 .raw_code_literal,
 
-                .@"bin_op +",
-                .@"bin_op +%",
-                .@"bin_op +|",
-                .@"bin_op -",
-                .@"bin_op -%",
-                .@"bin_op -|",
-                .@"bin_op *",
-                .@"bin_op *%",
-                .@"bin_op *|",
-                .@"bin_op /",
-                .@"bin_op %",
-                .@"bin_op <<",
-                .@"bin_op <<|",
-                .@"bin_op >>",
-                .@"bin_op &",
-                .@"bin_op |",
-                .@"bin_op ^",
-                .@"bin_op orelse",
-                .@"bin_op catch",
-                .@"bin_op and",
-                .@"bin_op or",
-                .@"bin_op ==",
-                .@"bin_op !=",
-                .@"bin_op >",
-                .@"bin_op >=",
-                .@"bin_op <",
-                .@"bin_op <=",
-                .@"bin_op ++",
-                .@"bin_op **",
-                .@"bin_op ||",
-
-                .@"postfix_op .?",
-                .@"postfix_op .*",
-
                 .builtin_call,
                 .function_call,
                 .optional,
@@ -986,7 +896,14 @@ fn formatExprNode(
                 .dot_access,
                 .decl_ref,
                 .pointer,
+                .error_union,
                 .error_set,
+
+                .@"bin_op orelse",
+                .@"bin_op catch",
+
+                .@"postfix_op .?",
+                .@"postfix_op .*",
                 => try writer.print("{}", .{self.fmtExprNode(pointer.child)}),
 
                 .sentinel => unreachable,
@@ -1007,11 +924,43 @@ fn formatExprNode(
                 .enum_literal => unreachable,
                 .list_init => unreachable,
 
+                .error_union_inferred => unreachable,
+
                 .@"prefix_op -" => unreachable,
                 .@"prefix_op -%" => unreachable,
                 .@"prefix_op ~" => unreachable,
                 .@"prefix_op !" => unreachable,
                 .@"prefix_op &" => unreachable,
+
+                .@"bin_op +" => unreachable,
+                .@"bin_op +%" => unreachable,
+                .@"bin_op +|" => unreachable,
+                .@"bin_op -" => unreachable,
+                .@"bin_op -%" => unreachable,
+                .@"bin_op -|" => unreachable,
+                .@"bin_op *" => unreachable,
+                .@"bin_op *%" => unreachable,
+                .@"bin_op *|" => unreachable,
+                .@"bin_op /" => unreachable,
+                .@"bin_op %" => unreachable,
+                .@"bin_op <<" => unreachable,
+                .@"bin_op <<|" => unreachable,
+                .@"bin_op >>" => unreachable,
+                .@"bin_op &" => unreachable,
+                .@"bin_op |" => unreachable,
+                .@"bin_op ^" => unreachable,
+
+                .@"bin_op and" => unreachable,
+                .@"bin_op or" => unreachable,
+                .@"bin_op ==" => unreachable,
+                .@"bin_op !=" => unreachable,
+                .@"bin_op >" => unreachable,
+                .@"bin_op >=" => unreachable,
+                .@"bin_op <" => unreachable,
+                .@"bin_op <=" => unreachable,
+                .@"bin_op ++" => unreachable,
+                .@"bin_op **" => unreachable,
+                .@"bin_op ||" => unreachable, // you should surround the error set union operation with parentheses.
             }
         },
         .parentheses_expression => try writer.print("({})", .{self.fmtExprNode(self.ordered_node_set.keys()[node.index])}),
@@ -1077,6 +1026,14 @@ fn formatExprNode(
             try writer.print("{s}", .{std.zig.fmtId(names[node.index])});
         },
 
+        .error_union_inferred => try writer.print("!{}", .{self.fmtExprNode(self.ordered_node_set.keys()[node.index])}),
+        .error_union =>
+        {
+            const operands = self.bin_expr_operands.keys()[node.index];
+            const error_set = operands.lhs;
+            const payload = operands.rhs;
+            try writer.print("{}!{}", .{self.fmtExprNode(error_set), self.fmtExprNode(payload)});
+        },
         .error_set =>
         {
             const set: []const []const u8 = self.error_sets_set.keys()[node.index];
@@ -1097,6 +1054,66 @@ fn formatExprNode(
                 },
             }
             try writer.writeAll("}");
+        },
+
+        .@"prefix_op -",
+        .@"prefix_op -%",
+        .@"prefix_op ~",
+        .@"prefix_op !",
+        .@"prefix_op &",
+        =>
+        {
+            const op_str = @tagName(node.tag)["prefix_op ".len..];
+            const target = self.ordered_node_set.keys()[node.index];
+            try writer.print("{s}{}", .{op_str, self.fmtExprNode(target)});
+        },
+
+        .@"bin_op +",
+        .@"bin_op +%",
+        .@"bin_op +|",
+        .@"bin_op -",
+        .@"bin_op -%",
+        .@"bin_op -|",
+        .@"bin_op *",
+        .@"bin_op *%",
+        .@"bin_op *|",
+        .@"bin_op /",
+        .@"bin_op %",
+        .@"bin_op <<",
+        .@"bin_op <<|",
+        .@"bin_op >>",
+        .@"bin_op &",
+        .@"bin_op |",
+        .@"bin_op ^",
+        .@"bin_op orelse",
+        .@"bin_op catch",
+        .@"bin_op and",
+        .@"bin_op or",
+        .@"bin_op ==",
+        .@"bin_op !=",
+        .@"bin_op >",
+        .@"bin_op >=",
+        .@"bin_op <",
+        .@"bin_op <=",
+        .@"bin_op ++",
+        .@"bin_op **",
+        .@"bin_op ||",
+        =>
+        {
+            const op_str = @tagName(node.tag)["bin_op ".len..];
+            const operands = self.bin_expr_operands.keys()[node.index];
+            const lhs = operands.lhs;
+            const rhs = operands.rhs;
+            try writer.print("{} {s} {}", .{self.fmtExprNode(lhs), op_str, self.fmtExprNode(rhs)});
+        },
+
+        .@"postfix_op .?",
+        .@"postfix_op .*",
+        =>
+        {
+            const op_str = @tagName(node.tag)["postfix_op ".len..];
+            const target = self.ordered_node_set.keys()[node.index];
+            try writer.print("{}{s}", .{self.fmtExprNode(target), op_str});
         },
     }
 }
@@ -1497,7 +1514,7 @@ pub const BinOp = enum(u8)
 };
 pub fn createBinOp(self: *Generator, lhs: ExprNode, op: BinOp, rhs: ExprNode) std.mem.Allocator.Error!ExprNode
 {
-    const gop = try self.bin_op_operands.getOrPut(self.allocator(), BinOpOperands{
+    const gop = try self.bin_expr_operands.getOrPut(self.allocator(), BinaryExprOperands{
         .lhs = lhs,
         .rhs = rhs,
     });
@@ -1739,6 +1756,26 @@ pub fn addUsingnamespace(self: *Generator, target: ExprNode) std.mem.Allocator.E
     try self.top_level_nodes.putNoClobber(self.allocator(), usingnamespace_node, {});
 }
 
+pub fn createErrorUnionTypeInferred(self: *Generator, payload: ExprNode) std.mem.Allocator.Error!ExprNode
+{
+    const gop = try self.ordered_node_set.getOrPut(self.allocator(), payload);
+    return ExprNode{
+        .index = gop.index,
+        .tag = .error_union_inferred,
+    };
+}
+pub fn createErrorUnionType(self: *Generator, error_set: ExprNode, payload: ExprNode) std.mem.Allocator.Error!ExprNode
+{
+    const gop = try self.bin_expr_operands.getOrPut(self.allocator(), BinaryExprOperands{
+        .lhs = error_set,
+        .rhs = payload,
+    });
+    return ExprNode{
+        .index = gop.index,
+        .tag = .error_union,
+    };
+}
+
 pub fn createErrorSet(self: *Generator, names: []const []const u8) std.mem.Allocator.Error!ExprNode
 {
     const names_duped = try self.allocator().alloc([]const u8, names.len);
@@ -1871,6 +1908,8 @@ test "node printing behavior"
     try gen.expectNodeFmt(std.fmt.comptimePrint("{d}", .{std.math.maxInt(usize) + 1}), try gen.createIntLiteral(.decimal, std.math.maxInt(usize) + 1));
     try gen.expectNodeFmt(".fizzbuzz", try gen.createEnumLiteralFrom(.fizzbuzz));
     try gen.expectNodeFmt(".@\"continue\"", try gen.createEnumLiteral("continue"));
+    try gen.expectNodeFmt("error{Foo}!void", try gen.createErrorUnionType(try gen.createErrorSet(&.{ "Foo" }), Generator.primType(void)));
+    try gen.expectNodeFmt("!void", try gen.createErrorUnionTypeInferred(Generator.primType(void)));
 
     try gen.expectNodeFmt(".{}", try gen.createListInit(.none, &.{}));
     try gen.expectNodeFmt(".{43}", try gen.createListInit(.none, &.{literal_43}));
