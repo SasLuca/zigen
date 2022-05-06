@@ -1316,11 +1316,10 @@ pub fn createIntLiteral(self: *Generator, radix: IntLiteralRadix, value: anytype
                 const literal = Generator.createAddrSizedIntLiteral(radix, std.math.absCast(value));
                 return if (value < 0) try self.createPrefixOp(.@"-", literal) else literal;
             }
-            var big_int = try std.math.big.int.Managed.initSet(self.arena.child_allocator, value);
+            var big_int = try std.math.big.int.Managed.initSet(self.arena.child_allocator, std.math.absCast(value));
             defer big_int.deinit();
 
             const literal = try self.createBigIntLiteral(radix, big_int.toConst());
-
             return if (value < 0) try self.createPrefixOp(.@"-", literal) else literal;
         },
         .ComptimeInt => return self.createIntLiteral(radix, @as(std.math.IntFittingRange(value, value), value)),
