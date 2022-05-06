@@ -411,30 +411,35 @@ pub const ExprNode = extern struct
     };
 };
 
-const PrimitiveType = enum(ExprNode.Index)
+pub const PrimitiveType = enum(ExprNode.Index)
 {
-    @"isize",
-    @"usize",
-    @"c_short",
-    @"c_ushort",
-    @"c_int",
-    @"c_uint",
-    @"c_long",
-    @"c_ulong",
-    @"c_longlong",
-    @"c_ulonglong",
-    @"c_longdouble",
-    @"bool",
-    @"anyopaque",
-    @"void",
-    @"noreturn",
-    @"type",
-    @"anyerror",
-    @"comptime_int",
-    @"comptime_float",
+    f16,
+    f32,
+    f64,
+    f80,
+    f128,
+    isize,
+    usize,
+    c_short,
+    c_ushort,
+    c_int,
+    c_uint,
+    c_long,
+    c_ulong,
+    c_longlong,
+    c_ulonglong,
+    c_longdouble,
+    bool,
+    anyopaque,
+    void,
+    noreturn,
+    type,
+    anyerror,
+    comptime_int,
+    comptime_float,
 };
 
-const PrimitiveValue = enum(ExprNode.Index)
+pub const PrimitiveValue = enum(ExprNode.Index)
 {
     @"true",
     @"false",
@@ -1165,13 +1170,10 @@ fn formatStatementNode(
     }
 }
 
-usingnamespace struct
+fn allocator(self: *Generator) std.mem.Allocator
 {
-    pub fn allocator(self: *Generator) std.mem.Allocator
-    {
-        return self.arena.allocator();
-    }
-};
+    return self.arena.allocator();
+}
 
 fn invalidExprNode(index_value: ExprNode.Index) ExprNode
 {
@@ -1761,7 +1763,7 @@ pub fn createErrorUnionType(self: *Generator, error_set: ExprNode, payload: Expr
     };
 }
 
-pub fn createErrorSet(self: *Generator, names: []const []const u8) std.mem.Allocator.Error!ExprNode
+pub fn createErrorSetType(self: *Generator, names: []const []const u8) std.mem.Allocator.Error!ExprNode
 {
     const names_duped = try self.allocator().alloc([]const u8, names.len);
     errdefer self.allocator().free(names_duped);
@@ -1772,6 +1774,11 @@ pub fn createErrorSet(self: *Generator, names: []const []const u8) std.mem.Alloc
         .index = gop.index,
         .tag = .error_set,
     };
+}
+pub fn createErrorSetTypeFrom(self: *Generator, comptime ErrorSet: type) std.mem.Allocator.Error!ExprNode
+{
+    comptime std.debug.assert(@typeInfo(ErrorSet) == .ErrorSet);
+    return self.createErrorSetType(std.meta.fieldNames(ErrorSet));
 }
 
 fn createUsingnamespace(self: *Generator, is_pub: bool, target: ExprNode) std.mem.Allocator.Error!StatementNode
@@ -1872,11 +1879,42 @@ fn expectNodeFmt(gen: *Generator, expected: []const u8, node: anytype) !void
     };
 }
 
-test "node printing behavior"
+test "basic types"
 {
-    const allocator = std.testing.allocator;
+    var gen = Generator.init(std.testing.allocator);
+    defer gen.deinit();
 
-    var gen = Generator.init(allocator);
+    try gen.expectNodeFmt("u32", Generator.intType(u32));
+    try gen.expectNodeFmt("type", Generator.primType(type));
+
+    try gen.expectNodeFmt("error{}", try gen.createErrorSetType(&.{}));
+    try gen.expectNodeFmt("error{Foo}", try gen.createErrorSetType(&.{"Foo"}));
+    try gen.expectNodeFmt("error{ Foo, Bar }", try gen.createErrorSetType(&.{ "Foo", "Bar" }));
+    try gen.expectNodeFmt("error{ Foo, Bar, Baz }", try gen.createErrorSetType(&.{ "Foo", "Bar", "Baz" }));
+
+    try gen.expectNodeFmt("!void", try gen.createErrorUnionTypeInferred(Generator.primType(void)));
+    try gen.expectNodeFmt("error{Foo}!void", try gen.createErrorUnionType(try gen.createErrorSetTypeFrom(error{Foo}), Generator.primType(void)));
+    try gen.expectNodeFmt("?i15", try gen.createOptionalType(Generator.primType(i15)));
+
+    try gen.expectNodeFmt("[*c]i8", try gen.createPointerType(.C, Generator.intType(i8), .{}));
+    try gen.expectNodeFmt("*u64", try gen.createPointerType(.One, Generator.intType(u64), .{}));
+    try gen.expectNodeFmt("[*]i32", try gen.createPointerType(.Many, Generator.intType(i32), .{}));
+    try gen.expectNodeFmt("[*:0]i8", try gen.createPointerType(.Many, Generator.intType(i8), .{ .sentinel = try gen.createIntLiteral(.decimal, 0) }));
+    try gen.expectNodeFmt("[]i8", try gen.createPointerType(.Slice, Generator.intType(i8), .{}));
+    try gen.expectNodeFmt("[]align(4) u16", try gen.createPointerType(.Slice, Generator.intType(u16), .{ .alignment = try gen.createIntLiteral(.decimal, 4) }));
+    try gen.expectNodeFmt("*allowzero f80", try gen.createPointerType(.One, Generator.primType(f80), .{ .flags = .{ .is_allowzero = true } }));
+    try gen.expectNodeFmt("[]const u8", try gen.createPointerType(.Slice, Generator.intType(u8), .{ .flags = .{ .is_const = true } }));
+    try gen.expectNodeFmt("[*]volatile c_int", try gen.createPointerType(.Many, Generator.primType(c_int), .{ .flags = .{ .is_volatile = true } }));
+    try gen.expectNodeFmt("[*:0]allowzero align(2) const volatile c_uint", try gen.createPointerType(.Many, Generator.primType(c_uint), .{
+        .sentinel = try gen.createIntLiteral(.decimal, 0),
+        .alignment = try gen.createIntLiteral(.decimal, 2),
+        .flags = .{ .is_allowzero = true, .is_const = true, .is_volatile = true },
+    }));
+}
+
+test "value expressions and statements"
+{
+    var gen = Generator.init(std.testing.allocator);
     defer gen.deinit();
 
     const u32_type = Generator.intType(u32);
@@ -1887,14 +1925,11 @@ test "node printing behavior"
     try gen.expectNodeFmt("43",  literal_43);
     try gen.expectNodeFmt("@as(*u32, undefined).*", try gen.createPostfixOp(try gen.createBuiltinCall(.as, &.{ p_u32_type, Generator.undefinedValue() }), .@".*"));
     try gen.expectNodeFmt("@This()", try gen.createBuiltinCall(.This, &.{}));
-    try gen.expectNodeFmt("type", Generator.primType(type));
     try gen.expectNodeFmt("(43)", try gen.createParenthesesExpression(literal_43));
     try gen.expectNodeFmt("(43 + 43)", try gen.createParenthesesExpression(try gen.createBinOp(literal_43, .@"+", literal_43)));
     try gen.expectNodeFmt(std.fmt.comptimePrint("{d}", .{std.math.maxInt(usize) + 1}), try gen.createIntLiteral(.decimal, std.math.maxInt(usize) + 1));
     try gen.expectNodeFmt(".fizzbuzz", try gen.createEnumLiteralFrom(.fizzbuzz));
     try gen.expectNodeFmt(".@\"continue\"", try gen.createEnumLiteral("continue"));
-    try gen.expectNodeFmt("error{Foo}!void", try gen.createErrorUnionType(try gen.createErrorSet(&.{ "Foo" }), Generator.primType(void)));
-    try gen.expectNodeFmt("!void", try gen.createErrorUnionTypeInferred(Generator.primType(void)));
 
     try gen.expectNodeFmt(".{}", try gen.createListInit(.none, &.{}));
     try gen.expectNodeFmt(".{43}", try gen.createListInit(.none, &.{literal_43}));
@@ -1927,40 +1962,6 @@ test "node printing behavior"
         .len = Generator.createAddrSizedIntLiteral(.decimal, 0),
         .sentinel = Generator.createAddrSizedIntLiteral(.decimal, 0),
     }), &.{}));
-
-    try gen.expectNodeFmt("*u32", p_u32_type);
-    try gen.expectNodeFmt("?*u32", try gen.createOptionalType(p_u32_type));
-    try gen.expectNodeFmt("**u32", try gen.createPointerType(.One, p_u32_type, .{}));
-
-    try gen.expectNodeFmt("[*]u32", try gen.createPointerType(.Many, u32_type, .{}));
-    try gen.expectNodeFmt("[]u32", try gen.createPointerType(.Slice, u32_type, .{}));
-    try gen.expectNodeFmt("[:0]u32", try gen.createPointerType(.Slice, u32_type, .{
-        .sentinel = Generator.createAddrSizedIntLiteral(.decimal, 0),
-    }));
-    try gen.expectNodeFmt("[:0]align(16) u32", try gen.createPointerType(.Slice, u32_type, .{
-        .sentinel = Generator.createAddrSizedIntLiteral(.decimal, 0),
-        .alignment = try gen.createIntLiteral(.decimal, 16),
-    }));
-    try gen.expectNodeFmt("[:0]allowzero align(16) u32", try gen.createPointerType(.Slice, u32_type, .{
-        .sentinel = Generator.createAddrSizedIntLiteral(.decimal, 0),
-        .alignment = try gen.createIntLiteral(.decimal, 16),
-        .flags = .{ .is_allowzero = true },
-    }));
-    try gen.expectNodeFmt("[:0]allowzero align(16) const u32", try gen.createPointerType(.Slice, u32_type, .{
-        .sentinel = Generator.createAddrSizedIntLiteral(.decimal, 0),
-        .alignment = try gen.createIntLiteral(.decimal, 16),
-        .flags = .{ .is_allowzero = true, .is_const = true },
-    }));
-    try gen.expectNodeFmt("[:0]allowzero align(16) const volatile u32", try gen.createPointerType(.Slice, u32_type, .{
-        .sentinel = Generator.createAddrSizedIntLiteral(.decimal, 0),
-        .alignment = try gen.createIntLiteral(.decimal, 16),
-        .flags = .{ .is_allowzero = true, .is_const = true, .is_volatile = true },
-    }));
-
-    try gen.expectNodeFmt("error{}", try gen.createErrorSet(&.{}));
-    try gen.expectNodeFmt("error{Foo}", try gen.createErrorSet(&.{"Foo"}));
-    try gen.expectNodeFmt("error{ Foo, Bar }", try gen.createErrorSet(&.{ "Foo", "Bar" }));
-    try gen.expectNodeFmt("error{ Foo, Bar, Baz }", try gen.createErrorSet(&.{ "Foo", "Bar", "Baz" }));
 
     try gen.expectNodeFmt("const foo = 3;\n", try gen.createDeclaration(.Const, "foo", null, try gen.createIntLiteral(.decimal, 3), .{}));
     try gen.expectNodeFmt("pub const foo = 3;\n", try gen.createDeclaration(.Const, "foo", null, try gen.createIntLiteral(.decimal, 3), .{
@@ -2035,9 +2036,7 @@ test "thorough check for prefix/bin/postfix ops"
 
 test "top level decls"
 {
-    const allocator = std.testing.allocator;
-
-    var gen = Generator.init(allocator);
+    var gen = Generator.init(std.testing.allocator);
     defer gen.deinit();
 
     const std_import = try gen.addDecl(false, .Const, "std", null, try gen.createBuiltinCall(.import, &.{ try gen.createStringLiteral("std") }));
@@ -2048,7 +2047,7 @@ test "top level decls"
     const bar_decl = try gen.addDecl(false, .Var, "bar", Generator.intType(u32), foo_decl);
     _ = try gen.addDecl(true, .Const, "p_bar", try gen.createPointerType(.One, Generator.intType(u32), .{}), try gen.createPrefixOp(.@"&", bar_decl));
     _ = try gen.addDecl(true, .Const, "empty_str", string_type_decl, try gen.createListInit(.none, &.{}));
-    _ = try gen.addDecl(true, .Const, "Error", Generator.primType(type), try gen.createErrorSet(&.{ "OutOfMemory" }));
+    _ = try gen.addDecl(true, .Const, "Error", Generator.primType(type), try gen.createErrorSetType(&.{ "OutOfMemory" }));
 
     try std.testing.expectFmt(
         \\const std = @import("std");
