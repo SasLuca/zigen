@@ -14,7 +14,7 @@ list_inits: std.ArrayListUnmanaged(ListInit) = .{},
 bin_expr_operands: ExternStructArraySet(BinaryExprOperands) = .{},
 builtin_calls: BuiltinCallSet = .{},
 function_calls: FunctionCallSet = .{},
-pointers: std.MultiArrayList(Pointer) = .{},
+pointer_types: std.MultiArrayList(PointerType) = .{},
 dot_accesses: std.ArrayListUnmanaged(DotAccess) = .{},
 
 error_sets_set: ErrorSetsSet = .{},
@@ -299,8 +299,16 @@ pub const ExprNode = extern struct
         function_call,
         /// index into field `Generator.ordered_node_set`.
         optional,
-        /// index into field `Generator.pointers`.
-        pointer,
+
+        /// index into field `Generator.pointer_types`.
+        pointer_one,
+        /// index into field `Generator.pointer_types`.
+        pointer_many,
+        /// index into field `Generator.pointer_types`.
+        pointer_slice,
+        /// index into field `Generator.pointer_types`.
+        pointer_c,
+
         /// index into field `Generator.ordered_node_set`.
         parentheses_expression,
         /// index into field `Generator.dot_accesses`.
@@ -599,9 +607,8 @@ const FunctionCall = struct
     params: []const ExprNode,
 };
 
-pub const Pointer = struct
+pub const PointerType = extern struct
 {
-    size: std.builtin.Type.Pointer.Size,
     alignment: ExprNode,
     child: ExprNode,
     sentinel: ExprNode,
@@ -613,6 +620,13 @@ pub const Pointer = struct
         is_volatile: bool = false,
         is_allowzero: bool = false,
     };
+};
+
+const ArrayType = extern struct
+{
+    len: ExprNode,
+    sentinel: ExprNode,
+    child: ExprNode,
 };
 
 const DotAccess = struct
@@ -827,19 +841,30 @@ fn formatExprNode(
             try writer.writeByte(')');
         },
         .optional => try writer.print("?{}", .{self.fmtExprNode(self.ordered_node_set.keys()[node.index])}),
-        .pointer =>
+        .pointer_one,
+        .pointer_many,
+        .pointer_slice,
+        .pointer_c,
+        =>
         {
-            const slice = self.pointers.slice();
+            const slice = self.pointer_types.slice();
 
-            const pointer = Pointer{
-                .size = slice.items(.size)[node.index],
+            const pointer = PointerType{
                 .sentinel = slice.items(.sentinel)[node.index],
                 .alignment = slice.items(.alignment)[node.index],
                 .flags = slice.items(.flags)[node.index],
                 .child = slice.items(.child)[node.index],
             };
+            const size: std.builtin.Type.Pointer.Size = switch (node.tag)
+            {
+                .pointer_one => .One,
+                .pointer_many => .Many,
+                .pointer_slice => .Slice,
+                .pointer_c => .C,
+                else => unreachable,
+            };
 
-            switch (pointer.size)
+            switch (size)
             {
                 .C =>
                 {
@@ -849,7 +874,7 @@ fn formatExprNode(
                 .One => std.debug.assert(pointer.sentinel.tag == .sentinel),
                 .Many, .Slice => {},
             }
-            switch (pointer.size)
+            switch (size)
             {
                 .One => try writer.writeByte('*'),
                 .Many =>
@@ -886,7 +911,12 @@ fn formatExprNode(
                 .parentheses_expression,
                 .dot_access,
                 .decl_ref,
-                .pointer,
+
+                .pointer_one,
+                .pointer_many,
+                .pointer_slice,
+                .pointer_c,
+
                 .error_union,
                 .error_set,
 
@@ -1648,15 +1678,14 @@ pub fn createPointerType(
     {
         sentinel: ?ExprNode = null,
         alignment: ?ExprNode = null,
-        flags: Pointer.Flags = .{ .is_allowzero = false, .is_const = false, .is_volatile = false },
+        flags: PointerType.Flags = .{ .is_allowzero = false, .is_const = false, .is_volatile = false },
     },
 ) std.mem.Allocator.Error!ExprNode
 {
-    const new_index = try self.pointers.addOne(self.allocator());
-    errdefer self.pointers.shrinkRetainingCapacity(new_index);
+    const new_index = try self.pointer_types.addOne(self.allocator());
+    errdefer self.pointer_types.shrinkRetainingCapacity(new_index);
 
-    self.pointers.set(new_index, Pointer{
-        .size = size,
+    self.pointer_types.set(new_index, PointerType{
         .alignment = extra.alignment orelse invalidExprNode(undefined),
         .child = child,
         .sentinel = extra.sentinel orelse invalidExprNode(undefined),
@@ -1665,7 +1694,13 @@ pub fn createPointerType(
 
     return ExprNode{
         .index = new_index,
-        .tag = .pointer,
+        .tag = switch (size)
+        {
+            .One => .pointer_one,
+            .Many => .pointer_many,
+            .Slice => .pointer_slice,
+            .C => .pointer_c,
+        },
     };
 }
 
@@ -1894,7 +1929,7 @@ test "basic types"
 
     try gen.expectNodeFmt("!void", try gen.createErrorUnionTypeInferred(Generator.primType(void)));
     try gen.expectNodeFmt("error{Foo}!void", try gen.createErrorUnionType(try gen.createErrorSetTypeFrom(error{Foo}), Generator.primType(void)));
-    try gen.expectNodeFmt("?i15", try gen.createOptionalType(Generator.primType(i15)));
+    try gen.expectNodeFmt("?i15", try gen.createOptionalType(Generator.intType(i15)));
 
     try gen.expectNodeFmt("[*c]i8", try gen.createPointerType(.C, Generator.intType(i8), .{}));
     try gen.expectNodeFmt("*u64", try gen.createPointerType(.One, Generator.intType(u64), .{}));
