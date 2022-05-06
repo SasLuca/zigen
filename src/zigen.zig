@@ -763,22 +763,8 @@ fn formatExprNode(
                 {
                     std.debug.assert(annotations.type.tag != .sentinel);
                     try writer.writeByte('[');
-                    if (annotations.len.unwrap()) |len|
-                    {
-                        try writer.print("{}", .{self.fmtExprNode(len)});
-                    }
-                    else
-                    {
-                        try writer.writeByte('_');
-                    }
-                    if (annotations.sentinel.unwrap()) |s|
-                    {
-                        try writer.print(":{}]", .{self.fmtExprNode(s)});
-                    }
-                    else
-                    {
-                        try writer.writeByte(']');
-                    }
+                    try if (annotations.len.unwrap()) |len| writer.print("{}", .{self.fmtExprNode(len)}) else writer.writeByte('_');
+                    try if (annotations.sentinel.unwrap()) |s| writer.print(":{}]", .{self.fmtExprNode(s)}) else writer.writeByte(']');
                     try writer.print("{}", .{self.fmtExprNode(annotations.type)});
                 },
             }
