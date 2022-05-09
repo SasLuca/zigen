@@ -1837,7 +1837,7 @@ pub fn createErrorUnionType(self: *Generator, error_set: ExprNode, payload: Expr
     };
 }
 
-pub fn createErrorSetType(self: *Generator, names: []const []const u8) std.mem.Allocator.Error!ExprNode
+pub fn createErrorSet(self: *Generator, names: []const []const u8) std.mem.Allocator.Error!ExprNode
 {
     const names_duped = try self.allocator().alloc([]const u8, names.len);
     errdefer self.allocator().free(names_duped);
@@ -1849,10 +1849,10 @@ pub fn createErrorSetType(self: *Generator, names: []const []const u8) std.mem.A
         .tag = .error_set,
     };
 }
-pub fn createErrorSetTypeFrom(self: *Generator, comptime ErrorSet: type) std.mem.Allocator.Error!ExprNode
+pub fn createErrorSetFrom(self: *Generator, comptime ErrorSet: type) std.mem.Allocator.Error!ExprNode
 {
     comptime std.debug.assert(@typeInfo(ErrorSet) == .ErrorSet);
-    return self.createErrorSetType(std.meta.fieldNames(ErrorSet));
+    return self.createErrorSet(std.meta.fieldNames(ErrorSet));
 }
 
 fn createUsingnamespace(self: *Generator, is_pub: bool, target: ExprNode) std.mem.Allocator.Error!StatementNode
@@ -1961,13 +1961,13 @@ test "basic types"
     try gen.expectNodeFmt("u32", Generator.intType(u32));
     try gen.expectNodeFmt("type", Generator.primType(type));
 
-    try gen.expectNodeFmt("error{}", try gen.createErrorSetType(&.{}));
-    try gen.expectNodeFmt("error{Foo}", try gen.createErrorSetType(&.{"Foo"}));
-    try gen.expectNodeFmt("error{ Foo, Bar }", try gen.createErrorSetType(&.{ "Foo", "Bar" }));
-    try gen.expectNodeFmt("error{ Foo, Bar, Baz }", try gen.createErrorSetType(&.{ "Foo", "Bar", "Baz" }));
+    try gen.expectNodeFmt("error{}", try gen.createErrorSet(&.{}));
+    try gen.expectNodeFmt("error{Foo}", try gen.createErrorSet(&.{"Foo"}));
+    try gen.expectNodeFmt("error{ Foo, Bar }", try gen.createErrorSet(&.{ "Foo", "Bar" }));
+    try gen.expectNodeFmt("error{ Foo, Bar, Baz }", try gen.createErrorSet(&.{ "Foo", "Bar", "Baz" }));
 
     try gen.expectNodeFmt("!void", try gen.createErrorUnionTypeInferred(Generator.primType(void)));
-    try gen.expectNodeFmt("error{Foo}!void", try gen.createErrorUnionType(try gen.createErrorSetTypeFrom(error{Foo}), Generator.primType(void)));
+    try gen.expectNodeFmt("error{Foo}!void", try gen.createErrorUnionType(try gen.createErrorSetFrom(error{Foo}), Generator.primType(void)));
     try gen.expectNodeFmt("?i15", try gen.createOptionalType(Generator.intType(i15)));
 
     try gen.expectNodeFmt("[63]u1", try gen.createArrayType(try gen.createIntLiteral(.decimal, 63), null, Generator.intType(u1)));
@@ -2124,7 +2124,7 @@ test "top level decls"
     const bar_decl = try gen.addDecl(false, .Var, "bar", Generator.intType(u32), foo_decl);
     _ = try gen.addDecl(true, .Const, "p_bar", try gen.createPointerType(.One, Generator.intType(u32), .{}), try gen.createPrefixOp(.@"&", bar_decl));
     _ = try gen.addDecl(true, .Const, "empty_str", string_type_decl, try gen.createListInit(.none, &.{}));
-    _ = try gen.addDecl(true, .Const, "Error", Generator.primType(type), try gen.createErrorSetType(&.{ "OutOfMemory" }));
+    _ = try gen.addDecl(true, .Const, "Error", Generator.primType(type), try gen.createErrorSet(&.{ "OutOfMemory" }));
 
     try std.testing.expectFmt(
         \\const std = @import("std");
