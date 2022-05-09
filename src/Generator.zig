@@ -15,6 +15,7 @@ bin_expr_operands: ExternStructArraySet(BinaryExprOperands) = .{},
 builtin_calls: BuiltinCallSet = .{},
 function_calls: FunctionCallSet = .{},
 pointer_types: std.MultiArrayList(PointerType) = .{},
+array_types: std.ArrayListUnmanaged(ArrayType) = .{},
 dot_accesses: std.ArrayListUnmanaged(DotAccess) = .{},
 
 error_sets_set: ErrorSetsSet = .{},
@@ -298,16 +299,19 @@ pub const ExprNode = extern struct
         /// index into field `Generator.function_calls`.
         function_call,
         /// index into field `Generator.ordered_node_set`.
-        optional,
+        optional_type,
 
         /// index into field `Generator.pointer_types`.
-        pointer_one,
+        pointer_type_one,
         /// index into field `Generator.pointer_types`.
-        pointer_many,
+        pointer_type_many,
         /// index into field `Generator.pointer_types`.
-        pointer_slice,
+        pointer_type_slice,
         /// index into field `Generator.pointer_types`.
-        pointer_c,
+        pointer_type_c,
+
+        /// index into field `Generator.array_types`.
+        array_type,
 
         /// index into field `Generator.ordered_node_set`.
         parentheses_expression,
@@ -840,11 +844,11 @@ fn formatExprNode(
             }
             try writer.writeByte(')');
         },
-        .optional => try writer.print("?{}", .{self.fmtExprNode(self.ordered_node_set.keys()[node.index])}),
-        .pointer_one,
-        .pointer_many,
-        .pointer_slice,
-        .pointer_c,
+        .optional_type => try writer.print("?{}", .{self.fmtExprNode(self.ordered_node_set.keys()[node.index])}),
+        .pointer_type_one,
+        .pointer_type_many,
+        .pointer_type_slice,
+        .pointer_type_c,
         =>
         {
             const slice = self.pointer_types.slice();
@@ -857,10 +861,10 @@ fn formatExprNode(
             };
             const size: std.builtin.Type.Pointer.Size = switch (node.tag)
             {
-                .pointer_one => .One,
-                .pointer_many => .Many,
-                .pointer_slice => .Slice,
-                .pointer_c => .C,
+                .pointer_type_one => .One,
+                .pointer_type_many => .Many,
+                .pointer_type_slice => .Slice,
+                .pointer_type_c => .C,
                 else => unreachable,
             };
 
@@ -907,15 +911,17 @@ fn formatExprNode(
 
                 .builtin_call,
                 .function_call,
-                .optional,
+                .optional_type,
                 .parentheses_expression,
                 .dot_access,
                 .decl_ref,
 
-                .pointer_one,
-                .pointer_many,
-                .pointer_slice,
-                .pointer_c,
+                .pointer_type_one,
+                .pointer_type_many,
+                .pointer_type_slice,
+                .pointer_type_c,
+
+                .array_type,
 
                 .error_union,
                 .error_set,
@@ -984,6 +990,18 @@ fn formatExprNode(
                 .@"bin_op ||" => unreachable, // you should surround the error set union operation with parentheses.
             }
         },
+
+        .array_type =>
+        {
+            const info: ArrayType = self.array_types.items[node.index];
+            try writer.print("[{}", .{self.fmtExprNode(info.len.unwrap().?)});
+            if (info.sentinel.unwrap()) |s|
+            {
+                try writer.print(":{}", .{self.fmtExprNode(s)});
+            }
+            try writer.print("]{}", .{self.fmtExprNode(info.child)});
+        },
+
         .parentheses_expression => try writer.print("({})", .{self.fmtExprNode(self.ordered_node_set.keys()[node.index])}),
         .dot_access =>
         {
@@ -1666,7 +1684,7 @@ pub fn createOptionalType(self: *Generator, node: ExprNode) std.mem.Allocator.Er
     const gop = try self.ordered_node_set.getOrPut(self.allocator(), node);
     return ExprNode{
         .index = gop.index,
-        .tag = .optional,
+        .tag = .optional_type,
     };
 }
 
@@ -1696,11 +1714,32 @@ pub fn createPointerType(
         .index = new_index,
         .tag = switch (size)
         {
-            .One => .pointer_one,
-            .Many => .pointer_many,
-            .Slice => .pointer_slice,
-            .C => .pointer_c,
+            .One => .pointer_type_one,
+            .Many => .pointer_type_many,
+            .Slice => .pointer_type_slice,
+            .C => .pointer_type_c,
         },
+    };
+}
+
+pub fn createArrayType(
+    self: *Generator,
+    len: ExprNode,
+    sentinel: ?ExprNode,
+    child: ExprNode,
+) std.mem.Allocator.Error!ExprNode
+{
+    const new_index = self.array_types.items.len;
+    try self.array_types.append(self.allocator(), ArrayType{
+        .len = len.unwrap().?,
+        .sentinel = if (sentinel) |s| s.unwrap().? else ExprNode.sentinel,
+        .child = child.unwrap().?,
+    });
+    errdefer self.array_types.pop();
+
+    return ExprNode{
+        .index = new_index,
+        .tag = .array_type,
     };
 }
 
@@ -1930,6 +1969,9 @@ test "basic types"
     try gen.expectNodeFmt("!void", try gen.createErrorUnionTypeInferred(Generator.primType(void)));
     try gen.expectNodeFmt("error{Foo}!void", try gen.createErrorUnionType(try gen.createErrorSetTypeFrom(error{Foo}), Generator.primType(void)));
     try gen.expectNodeFmt("?i15", try gen.createOptionalType(Generator.intType(i15)));
+
+    try gen.expectNodeFmt("[63]u1", try gen.createArrayType(try gen.createIntLiteral(.decimal, 63), null, Generator.intType(u1)));
+    try gen.expectNodeFmt("[24:0]u7", try gen.createArrayType(try gen.createIntLiteral(.decimal, 24), try gen.createIntLiteral(.decimal, 0), Generator.intType(u7)));
 
     try gen.expectNodeFmt("[*c]i8", try gen.createPointerType(.C, Generator.intType(i8), .{}));
     try gen.expectNodeFmt("*u64", try gen.createPointerType(.One, Generator.intType(u64), .{}));
