@@ -7,7 +7,7 @@ top_level_nodes: ExternStructArraySet(StatementNode) = .{},
 decls: std.MultiArrayList(Decl) = .{},
 
 ordered_string_set: std.StringArrayHashMapUnmanaged(void) = .{},
-ordered_node_set: ExternStructArraySet(ExprNode) = .{},
+ordered_expr_node_set: OrderedExprNodeSet = .{},
 
 big_int_literals: BigIntSet = .{},
 list_inits: std.ArrayListUnmanaged(ListInit) = .{},
@@ -54,6 +54,28 @@ fn dupeExprNodeList(self: *Generator, node_list: []const ExprNode) std.mem.Alloc
     return gop.key_ptr.*;
 }
 
+const OrderedExprNodeSet = std.ArrayHashMapUnmanaged(
+    ExprNode,
+    void,
+    struct
+    {
+        pub fn hash(ctx: @This(), node: ExprNode) u32
+        {
+            _ = ctx;
+            var hasher = std.hash.Wyhash.init(0);
+            hasher.update(std.mem.asBytes(&node.tag));
+            hasher.update(std.mem.asBytes(&node.tag));
+            return @truncate(u32, hasher.final());
+        }
+        pub fn eql(ctx: @This(), a: ExprNode, b: ExprNode, b_index: usize) bool
+        {
+            _ = ctx;
+            _ = b_index;
+            return a.tag == b.tag and a.index == b.index;
+        }
+    },
+    false,
+);
 const StringSet = std.StringHashMapUnmanaged(void);
 const BigIntSet = std.ArrayHashMapUnmanaged(
     []const std.math.big.Limb,
@@ -230,9 +252,9 @@ pub const StatementNode = extern struct
         decl_pub_const,
         /// index into field `Generator.decls`.
         decl_pub_var,
-        /// index into field `Generator.ordered_node_set`.
+        /// index into field `Generator.ordered_expr_node_set`.
         usingnamespace_statement,
-        /// index into field `Generator.ordered_node_set`.
+        /// index into field `Generator.ordered_expr_node_set`.
         pub_usingnamespace_statement,
     };
 
@@ -298,7 +320,7 @@ pub const ExprNode = extern struct
         builtin_call,
         /// index into field `Generator.function_calls`.
         function_call,
-        /// index into field `Generator.ordered_node_set`.
+        /// index into field `Generator.ordered_expr_node_set`.
         optional_type,
 
         /// index into field `Generator.pointer_types`.
@@ -313,29 +335,29 @@ pub const ExprNode = extern struct
         /// index into field `Generator.array_types`.
         array_type,
 
-        /// index into field `Generator.ordered_node_set`.
+        /// index into field `Generator.ordered_expr_node_set`.
         parentheses_expression,
         /// index into field `Generator.dot_accesses`.
         dot_access,
         /// index into field `Generator.decls`.
         decl_ref,
 
-        /// index into field `Generator.ordered_node_set`.
+        /// index into field `Generator.ordered_expr_node_set`.
         error_union_inferred,
         /// index into field `Generator.bin_expr_operands`.
         error_union,
         /// index into field `Generator.error_sets_set`.
         error_set,
 
-        /// index into field `Generator.ordered_node_set`.
+        /// index into field `Generator.ordered_expr_node_set`.
         @"prefix_op -",
-        /// index into field `Generator.ordered_node_set`.
+        /// index into field `Generator.ordered_expr_node_set`.
         @"prefix_op -%",
-        /// index into field `Generator.ordered_node_set`.
+        /// index into field `Generator.ordered_expr_node_set`.
         @"prefix_op ~",
-        /// index into field `Generator.ordered_node_set`.
+        /// index into field `Generator.ordered_expr_node_set`.
         @"prefix_op !",
-        /// index into field `Generator.ordered_node_set`.
+        /// index into field `Generator.ordered_expr_node_set`.
         @"prefix_op &",
 
         /// index into field `Generator.bin_expr_operands`.
@@ -407,9 +429,9 @@ pub const ExprNode = extern struct
         /// index into field `Generator.bin_expr_operands`.
         @"bin_op ||",
 
-        /// index into field `Generator.ordered_node_set`.
+        /// index into field `Generator.ordered_expr_node_set`.
         @"postfix_op .?",
-        /// index into field `Generator.ordered_node_set`.
+        /// index into field `Generator.ordered_expr_node_set`.
         @"postfix_op .*",
     };
 
@@ -844,7 +866,7 @@ fn formatExprNode(
             }
             try writer.writeByte(')');
         },
-        .optional_type => try writer.print("?{}", .{self.fmtExprNode(self.ordered_node_set.keys()[node.index])}),
+        .optional_type => try writer.print("?{}", .{self.fmtExprNode(self.ordered_expr_node_set.keys()[node.index])}),
         .pointer_type_one,
         .pointer_type_many,
         .pointer_type_slice,
@@ -1002,7 +1024,7 @@ fn formatExprNode(
             try writer.print("]{}", .{self.fmtExprNode(info.child)});
         },
 
-        .parentheses_expression => try writer.print("({})", .{self.fmtExprNode(self.ordered_node_set.keys()[node.index])}),
+        .parentheses_expression => try writer.print("({})", .{self.fmtExprNode(self.ordered_expr_node_set.keys()[node.index])}),
         .dot_access =>
         {
             const dot_access: DotAccess = self.dot_accesses.items[node.index];
@@ -1065,7 +1087,7 @@ fn formatExprNode(
             try writer.print("{s}", .{std.zig.fmtId(names[node.index])});
         },
 
-        .error_union_inferred => try writer.print("!{}", .{self.fmtExprNode(self.ordered_node_set.keys()[node.index])}),
+        .error_union_inferred => try writer.print("!{}", .{self.fmtExprNode(self.ordered_expr_node_set.keys()[node.index])}),
         .error_union =>
         {
             const operands = self.bin_expr_operands.keys()[node.index];
@@ -1103,7 +1125,7 @@ fn formatExprNode(
         =>
         {
             const op_str = @tagName(node.tag)["prefix_op ".len..];
-            const target = self.ordered_node_set.keys()[node.index];
+            const target = self.ordered_expr_node_set.keys()[node.index];
             try writer.print("{s}{}", .{op_str, self.fmtExprNode(target)});
         },
 
@@ -1151,7 +1173,7 @@ fn formatExprNode(
         =>
         {
             const op_str = @tagName(node.tag)["postfix_op ".len..];
-            const target = self.ordered_node_set.keys()[node.index];
+            const target = self.ordered_expr_node_set.keys()[node.index];
             try writer.print("{}{s}", .{self.fmtExprNode(target), op_str});
         },
     }
@@ -1213,8 +1235,8 @@ fn formatStatementNode(
             if (decl.value.unwrap())            |val| try writer.print(" = {}",             .{self.fmtExprNode(val)});
             try writer.writeAll(";\n");
         },
-        .usingnamespace_statement => try writer.print("usingnamespace {};\n", .{self.fmtExprNode(self.ordered_node_set.keys()[node.index])}),
-        .pub_usingnamespace_statement => try writer.print("pub usingnamespace {};\n", .{self.fmtExprNode(self.ordered_node_set.keys()[node.index])}),
+        .usingnamespace_statement => try writer.print("usingnamespace {};\n", .{self.fmtExprNode(self.ordered_expr_node_set.keys()[node.index])}),
+        .pub_usingnamespace_statement => try writer.print("pub usingnamespace {};\n", .{self.fmtExprNode(self.ordered_expr_node_set.keys()[node.index])}),
     }
 }
 
@@ -1492,7 +1514,7 @@ pub const PrefixOp = enum
 };
 pub fn createPrefixOp(self: *Generator, op: PrefixOp, target: ExprNode) std.mem.Allocator.Error!ExprNode
 {
-    const gop = try self.ordered_node_set.getOrPut(self.allocator(), target);
+    const gop = try self.ordered_expr_node_set.getOrPut(self.allocator(), target);
     return ExprNode{
         .index = gop.index,
         .tag = switch (op)
@@ -1605,7 +1627,7 @@ pub const PostfixOp = enum {
 };
 pub fn createPostfixOp(self: *Generator, target: ExprNode, op: PostfixOp) std.mem.Allocator.Error!ExprNode
 {
-    const gop = try self.ordered_node_set.getOrPut(self.allocator(), target);
+    const gop = try self.ordered_expr_node_set.getOrPut(self.allocator(), target);
     return ExprNode{
         .index = gop.index,
         .tag = switch (op)
@@ -1681,7 +1703,7 @@ pub fn createFunctionCall(self: *Generator, callable: ExprNode, params: []const 
 
 pub fn createOptionalType(self: *Generator, node: ExprNode) std.mem.Allocator.Error!ExprNode
 {
-    const gop = try self.ordered_node_set.getOrPut(self.allocator(), node);
+    const gop = try self.ordered_expr_node_set.getOrPut(self.allocator(), node);
     return ExprNode{
         .index = gop.index,
         .tag = .optional_type,
@@ -1745,7 +1767,7 @@ pub fn createArrayType(
 
 pub fn createParenthesesExpression(self: *Generator, node: ExprNode) std.mem.Allocator.Error!ExprNode
 {
-    const gop = try self.ordered_node_set.getOrPut(self.allocator(), node);
+    const gop = try self.ordered_expr_node_set.getOrPut(self.allocator(), node);
     return ExprNode{
         .index = gop.index,
         .tag = .parentheses_expression,
@@ -1819,7 +1841,7 @@ pub fn addUsingnamespace(self: *Generator, target: ExprNode) std.mem.Allocator.E
 
 pub fn createErrorUnionTypeInferred(self: *Generator, payload: ExprNode) std.mem.Allocator.Error!ExprNode
 {
-    const gop = try self.ordered_node_set.getOrPut(self.allocator(), payload);
+    const gop = try self.ordered_expr_node_set.getOrPut(self.allocator(), payload);
     return ExprNode{
         .index = gop.index,
         .tag = .error_union_inferred,
@@ -1857,7 +1879,7 @@ pub fn createErrorSetFrom(self: *Generator, comptime ErrorSet: type) std.mem.All
 
 fn createUsingnamespace(self: *Generator, is_pub: bool, target: ExprNode) std.mem.Allocator.Error!StatementNode
 {
-    const gop = try self.ordered_node_set.getOrPut(self.allocator(), target);
+    const gop = try self.ordered_expr_node_set.getOrPut(self.allocator(), target);
     return StatementNode{
         .index = gop.index,
         .tag = if (is_pub)
