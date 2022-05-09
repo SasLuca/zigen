@@ -53,6 +53,14 @@ fn dupeExprNodeList(self: *Generator, node_list: []const ExprNode) std.mem.Alloc
     }
     return gop.key_ptr.*;
 }
+fn unfmtZigId(str: []const u8) []const u8
+{
+    if (str.len < "@\"\"".len) return str;
+    if (str[0] != '@') return str;
+    if (str[1] != '"') return str;
+    if (str[str.len - 1] != '"') return str;
+    return str["@\"".len .. str.len - "\"".len];
+}
 
 const OrderedExprNodeSet = std.ArrayHashMapUnmanaged(
     ExprNode,
@@ -1864,7 +1872,7 @@ pub fn createErrorSet(self: *Generator, names: []const []const u8) std.mem.Alloc
     const names_duped = try self.allocator().alloc([]const u8, names.len);
     errdefer self.allocator().free(names_duped);
     
-    for (names_duped) |*name, i| name.* = try self.dupeString(names[i]);
+    for (names_duped) |*name, i| name.* = try self.dupeString(unfmtZigId(names[i]));
     const gop = try self.error_sets_set.getOrPut(self.allocator(), names_duped);
     return ExprNode{
         .index = gop.index,
@@ -1904,7 +1912,7 @@ fn createDeclaration(
     },
 ) std.mem.Allocator.Error!StatementNode
 {
-    const duped_name = try self.dupeString(name);
+    const duped_name = try self.dupeString(unfmtZigId(name));
 
     const duped_extern_mod: Decl.ExternMod = switch (extra.extern_mod)
     {
